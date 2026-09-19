@@ -1,5 +1,31 @@
-# Jawwak Google Flights Debug V6
+# Jawwak Google Flights — Fli Engine
 
-Diagnostic-only server. It calls fast-flights-ts with a true `round-trip` query and exposes the parsed raw result structure through `/api/debug-roundtrip` so we can determine where the outbound/return itinerary and total price live.
+Experimental standalone Google Flights service for testing genuine round-trip itineraries.
 
-Do not connect this service to the main Jawwak frontend. After the diagnostic response is understood, build the production implementation from the observed structure.
+## Engine
+Uses the open-source `fli` Python library, which talks to Google's internal Flights RPC directly and supports one-way and round-trip searches.
+
+## Endpoints
+- GET `/api/health`
+- POST `/api/search-flights`
+
+## Environment
+- `PORT` — Render supplies this automatically.
+- `JAWAKK_GOOGLE_FLIGHTS_API_KEY` — optional but recommended.
+- `MAX_RESULTS` — optional, default 50.
+
+## Test body
+```json
+{
+  "from": "CAI",
+  "to": "JED",
+  "departDate": "2026-10-19",
+  "returnDate": "2026-10-26",
+  "adults": 1,
+  "children": 0,
+  "infants": 0,
+  "cabin": "economy"
+}
+```
+
+This version intentionally returns the complete parsed itinerary objects rather than converting them into the old Jawwak schema. The first goal is to verify that Google/fli returns both legs and one itinerary-level price without any manual pairing.

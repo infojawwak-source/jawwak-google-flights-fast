@@ -1,9 +1,6 @@
 services:
   - type: web
-    name: jawwak-google-flights
-    runtime: node
-    buildCommand: npm install
-    startCommand: npm start
-    envVars:
-      - key: JAWAKK_GOOGLE_FLIGHTS_API_KEY
-        sync: false
+    name: jawwak-google-flights-fli
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
