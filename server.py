@@ -1,7 +1,11 @@
 import os
 import json
 import traceback
+import inspect
+import importlib.metadata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import fli
 
 from fli.models import (
     Airport,
@@ -11,11 +15,11 @@ from fli.models import (
     FlightSearchFilters,
     FlightSegment,
 )
+
 from fli.search import SearchFlights
 
 
 PORT = int(os.environ.get("PORT", "10000"))
-MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "50"))
 
 
 # =========================================================
@@ -23,28 +27,40 @@ MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "50"))
 # =========================================================
 
 def add_cors(handler):
+
     handler.send_header(
         "Access-Control-Allow-Origin",
         "*"
     )
+
     handler.send_header(
         "Access-Control-Allow-Methods",
         "GET, POST, OPTIONS"
     )
+
     handler.send_header(
         "Access-Control-Allow-Headers",
         "Content-Type, Accept"
     )
 
 
-def send_json(handler, status_code, payload):
+def send_json(
+    handler,
+    status_code,
+    payload
+):
+
     body = json.dumps(
         payload,
         ensure_ascii=False,
-        default=str
+        default=str,
+        indent=2
     ).encode("utf-8")
 
-    handler.send_response(status_code)
+    handler.send_response(
+        status_code
+    )
+
     add_cors(handler)
 
     handler.send_header(
@@ -58,10 +74,14 @@ def send_json(handler, status_code, payload):
     )
 
     handler.end_headers()
-    handler.wfile.write(body)
+
+    handler.wfile.write(
+        body
+    )
 
 
 def read_json(handler):
+
     content_length = int(
         handler.headers.get(
             "Content-Length",
@@ -85,192 +105,271 @@ def read_json(handler):
 
 
 # =========================================================
-# Cabin
+# Safe representation helpers
 # =========================================================
 
-def normalize_cabin(value):
+def safe_repr(value):
 
-    value = str(
-        value or "economy"
-    ).strip().lower()
+    try:
+        return repr(value)
 
-    if value == "business":
-        if hasattr(
-            SeatType,
-            "BUSINESS"
-        ):
-            return SeatType.BUSINESS
+    except Exception:
+        return str(value)
 
-    if value == "first":
-        if hasattr(
-            SeatType,
-            "FIRST"
-        ):
-            return SeatType.FIRST
 
-    if value in (
-        "premium_economy",
-        "premium"
-    ):
-        if hasattr(
-            SeatType,
-            "PREMIUM_ECONOMY"
-        ):
-            return SeatType.PREMIUM_ECONOMY
+def enum_values(enum_class):
 
-    return SeatType.ECONOMY
+    result = {}
+
+    try:
+
+        for name in dir(enum_class):
+
+            if name.startswith("_"):
+                continue
+
+            try:
+
+                value = getattr(
+                    enum_class,
+                    name
+                )
+
+                if callable(value):
+                    continue
+
+                result[name] = safe_repr(
+                    value
+                )
+
+            except Exception:
+                pass
+
+    except Exception:
+        pass
+
+    return result
+
+
+def model_fields(model_class):
+
+    result = {}
+
+    try:
+
+        fields = getattr(
+            model_class,
+            "model_fields",
+            None
+        )
+
+        if fields:
+
+            for name, field in fields.items():
+
+                result[name] = {
+                    "annotation":
+                        str(
+                            getattr(
+                                field,
+                                "annotation",
+                                None
+                            )
+                        ),
+                    "required":
+                        bool(
+                            getattr(
+                                field,
+                                "is_required",
+                                lambda: False
+                            )()
+                        )
+                }
+
+            return result
+
+    except Exception:
+        pass
+
+    try:
+
+        fields = getattr(
+            model_class,
+            "__fields__",
+            None
+        )
+
+        if fields:
+
+            for name, field in fields.items():
+
+                result[name] = {
+                    "type":
+                        str(
+                            getattr(
+                                field,
+                                "type_",
+                                None
+                            )
+                        ),
+                    "required":
+                        bool(
+                            getattr(
+                                field,
+                                "required",
+                                False
+                            )
+                        )
+                }
+
+    except Exception:
+        pass
+
+    return result
+
+
+def class_signature(
+    class_object
+):
+
+    try:
+
+        return str(
+            inspect.signature(
+                class_object
+            )
+        )
+
+    except Exception as error:
+
+        return (
+            "SIGNATURE_ERROR: "
+            + str(error)
+        )
+
+
+def method_signature(
+    object_instance,
+    method_name
+):
+
+    try:
+
+        method = getattr(
+            object_instance,
+            method_name
+        )
+
+        return str(
+            inspect.signature(
+                method
+            )
+        )
+
+    except Exception as error:
+
+        return (
+            "SIGNATURE_ERROR: "
+            + str(error)
+        )
 
 
 # =========================================================
-# Sort
+# Fli version
 # =========================================================
 
-def normalize_sort(value):
+def get_fli_version():
 
-    value = str(
-        value or "cheapest"
-    ).strip().lower()
+    try:
 
-    if value == "duration":
-        if hasattr(
-            SortBy,
-            "DURATION"
-        ):
-            return SortBy.DURATION
+        return importlib.metadata.version(
+            "flights"
+        )
 
-    if value == "departure_time":
-        if hasattr(
-            SortBy,
-            "DEPARTURE_TIME"
-        ):
-            return SortBy.DEPARTURE_TIME
+    except Exception:
 
-    if value == "arrival_time":
-        if hasattr(
-            SortBy,
-            "ARRIVAL_TIME"
-        ):
-            return SortBy.ARRIVAL_TIME
+        try:
 
-    return SortBy.CHEAPEST
+            return importlib.metadata.version(
+                "fli"
+            )
+
+        except Exception as error:
+
+            return (
+                "VERSION_ERROR: "
+                + str(error)
+            )
 
 
 # =========================================================
-# Airport
+# Airport diagnostics
 # =========================================================
 
-def get_airport(code):
+def airport_info(code):
 
     code = str(
         code or ""
     ).strip().upper()
 
-    if not code:
-        raise ValueError(
-            "Airport code is empty"
-        )
+    result = {
+        "requested": code,
+        "exists": False,
+        "value": None,
+        "repr": None
+    }
 
     try:
-        return getattr(
+
+        airport = getattr(
             Airport,
             code
         )
 
-    except AttributeError:
+        result["exists"] = True
 
-        raise ValueError(
-            f"Unsupported airport code: {code}"
+        result["value"] = str(
+            getattr(
+                airport,
+                "value",
+                airport
+            )
         )
+
+        result["repr"] = repr(
+            airport
+        )
+
+    except Exception as error:
+
+        result["error"] = str(
+            error
+        )
+
+    return result
 
 
 # =========================================================
-# Build Filters
+# Build diagnostic FlightSegment
 # =========================================================
 
-def build_filters(search):
+def build_test_segment(
+    from_code,
+    to_code,
+    depart_date
+):
 
-    from_code = str(
-        search.get(
-            "from",
-            ""
-        )
-    ).strip().upper()
-
-    to_code = str(
-        search.get(
-            "to",
-            ""
-        )
-    ).strip().upper()
-
-    depart_date = str(
-        search.get(
-            "departDate",
-            ""
-        )
-    ).strip()
-
-    return_date = str(
-        search.get(
-            "returnDate",
-            ""
-        )
-    ).strip()
-
-    adults = int(
-        search.get(
-            "adults",
-            1
-        ) or 1
-    )
-
-    children = int(
-        search.get(
-            "children",
-            0
-        ) or 0
-    )
-
-    infants = int(
-        search.get(
-            "infants",
-            0
-        ) or 0
-    )
-
-    # =====================================================
-    # Airports
-    # =====================================================
-
-    departure_airport = get_airport(
+    departure_airport = getattr(
+        Airport,
         from_code
     )
 
-    arrival_airport = get_airport(
+    arrival_airport = getattr(
+        Airport,
         to_code
     )
 
-    # =====================================================
-    # Passengers
-    # =====================================================
-
-    passenger_info = PassengerInfo(
-        adults=adults,
-        children=children,
-        infants=infants
-    )
-
-    # =====================================================
-    # Flight Segments
-    # =====================================================
-
-    segments = []
-
-    # -----------------------------------------------------
-    # Outbound
-    # -----------------------------------------------------
-
-    outbound = FlightSegment(
+    segment = FlightSegment(
         departure_airport=[
             [departure_airport, 0]
         ],
@@ -280,54 +379,188 @@ def build_filters(search):
         travel_date=depart_date
     )
 
-    segments.append(
-        outbound
+    return segment
+
+
+# =========================================================
+# Build diagnostic filters
+# =========================================================
+
+def build_test_filters(
+    from_code,
+    to_code,
+    depart_date
+):
+
+    segment = build_test_segment(
+        from_code,
+        to_code,
+        depart_date
     )
 
-    # -----------------------------------------------------
-    # Return
-    # -----------------------------------------------------
-
-    if return_date:
-
-        return_segment = FlightSegment(
-            departure_airport=[
-                [arrival_airport, 0]
-            ],
-            arrival_airport=[
-                [departure_airport, 0]
-            ],
-            travel_date=return_date
-        )
-
-        segments.append(
-            return_segment
-        )
-
-    # =====================================================
-    # Filters
-    #
-    # MaxStops intentionally omitted.
-    # =====================================================
+    passenger_info = PassengerInfo(
+        adults=1
+    )
 
     filters = FlightSearchFilters(
         passenger_info=passenger_info,
-        flight_segments=segments,
-        seat_type=normalize_cabin(
-            search.get(
-                "cabin",
-                "economy"
-            )
-        ),
-        sort_by=normalize_sort(
-            search.get(
-                "sort",
-                "cheapest"
-            )
-        )
+        flight_segments=[
+            segment
+        ],
+        seat_type=SeatType.ECONOMY
     )
 
     return filters
+
+
+# =========================================================
+# Serialize Fli result
+# =========================================================
+
+def serialize_result(
+    item
+):
+
+    try:
+
+        if hasattr(
+            item,
+            "model_dump"
+        ):
+
+            return item.model_dump()
+
+        if hasattr(
+            item,
+            "dict"
+        ):
+
+            return item.dict()
+
+        if hasattr(
+            item,
+            "__dict__"
+        ):
+
+            return item.__dict__
+
+        return str(item)
+
+    except Exception as error:
+
+        return {
+            "serializationError":
+                str(error),
+            "repr":
+                repr(item)
+        }
+
+
+# =========================================================
+# Run diagnostic search
+# =========================================================
+
+def run_diagnostic_search(
+    from_code,
+    to_code,
+    depart_date
+):
+
+    diagnostic = {
+        "searchStarted": False,
+        "filtersCreated": False,
+        "searchEngineCreated": False,
+        "searchCalled": False,
+        "resultCount": None,
+        "results": [],
+        "error": None
+    }
+
+    try:
+
+        filters = build_test_filters(
+            from_code,
+            to_code,
+            depart_date
+        )
+
+        diagnostic[
+            "filtersCreated"
+        ] = True
+
+        diagnostic[
+            "filtersRepr"
+        ] = repr(filters)
+
+        diagnostic[
+            "filtersType"
+        ] = str(
+            type(filters)
+        )
+
+        search_engine = SearchFlights()
+
+        diagnostic[
+            "searchEngineCreated"
+        ] = True
+
+        diagnostic[
+            "searchMethodSignature"
+        ] = method_signature(
+            search_engine,
+            "search"
+        )
+
+        diagnostic[
+            "searchStarted"
+        ] = True
+
+        # -------------------------------------------------
+        # IMPORTANT:
+        # Very simple Fli search.
+        # No stops.
+        # No airline filters.
+        # No sort.
+        # No currency.
+        # -------------------------------------------------
+
+        results = search_engine.search(
+            filters,
+            top_n=10
+        )
+
+        diagnostic[
+            "searchCalled"
+        ] = True
+
+        if results is None:
+
+            results = []
+
+        diagnostic[
+            "resultCount"
+        ] = len(results)
+
+        diagnostic[
+            "results"
+        ] = [
+            serialize_result(item)
+            for item in results
+        ]
+
+        return diagnostic
+
+    except Exception as error:
+
+        diagnostic[
+            "error"
+        ] = str(error)
+
+        diagnostic[
+            "traceback"
+        ] = traceback.format_exc()
+
+        return diagnostic
 
 
 # =========================================================
@@ -343,6 +576,7 @@ class Handler(
         format,
         *args
     ):
+
         print(
             "%s - %s"
             % (
@@ -357,9 +591,13 @@ class Handler(
 
     def do_OPTIONS(self):
 
-        self.send_response(204)
+        self.send_response(
+            204
+        )
 
-        add_cors(self)
+        add_cors(
+            self
+        )
 
         self.end_headers()
 
@@ -369,7 +607,9 @@ class Handler(
 
     def do_GET(self):
 
-        path = self.path.split("?")[0]
+        path = self.path.split(
+            "?"
+        )[0]
 
         # -------------------------------------------------
         # Root
@@ -383,8 +623,9 @@ class Handler(
                 {
                     "ok": True,
                     "service":
-                        "jawwak-google-flights-fli",
-                    "engine": "fli"
+                        "jawwak-google-flights-fli-diagnostic",
+                    "mode":
+                        "diagnostic-only"
                 }
             )
 
@@ -402,11 +643,294 @@ class Handler(
                 {
                     "ok": True,
                     "service":
-                        "jawwak-google-flights-fli",
-                    "engine": "fli",
-                    "roundTripEngine":
-                        "direct-google-rpc",
-                    "apiKeyRequired": False
+                        "jawwak-google-flights-fli-diagnostic",
+                    "mode":
+                        "diagnostic-only",
+                    "engine":
+                        "fli",
+                    "fliVersion":
+                        get_fli_version()
+                }
+            )
+
+            return
+
+        # -------------------------------------------------
+        # Fli information
+        # -------------------------------------------------
+
+        if path == "/api/diagnostic":
+
+            try:
+
+                search_engine = (
+                    SearchFlights()
+                )
+
+                payload = {
+
+                    "ok": True,
+
+                    "mode":
+                        "diagnostic-only",
+
+                    "python": {
+                        "version":
+                            os.sys.version
+                    },
+
+                    "fli": {
+
+                        "module":
+                            str(fli),
+
+                        "version":
+                            get_fli_version(),
+
+                        "searchFlightsSignature":
+                            class_signature(
+                                SearchFlights
+                            ),
+
+                        "searchMethodSignature":
+                            method_signature(
+                                search_engine,
+                                "search"
+                            )
+                    },
+
+                    "models": {
+
+                        "Airport": {
+                            "signature":
+                                class_signature(
+                                    Airport
+                                ),
+                            "fields":
+                                model_fields(
+                                    Airport
+                                )
+                        },
+
+                        "PassengerInfo": {
+                            "signature":
+                                class_signature(
+                                    PassengerInfo
+                                ),
+                            "fields":
+                                model_fields(
+                                    PassengerInfo
+                                )
+                        },
+
+                        "FlightSegment": {
+                            "signature":
+                                class_signature(
+                                    FlightSegment
+                                ),
+                            "fields":
+                                model_fields(
+                                    FlightSegment
+                                )
+                        },
+
+                        "FlightSearchFilters": {
+                            "signature":
+                                class_signature(
+                                    FlightSearchFilters
+                                ),
+                            "fields":
+                                model_fields(
+                                    FlightSearchFilters
+                                )
+                        },
+
+                        "SeatType": {
+                            "values":
+                                enum_values(
+                                    SeatType
+                                )
+                        },
+
+                        "SortBy": {
+                            "values":
+                                enum_values(
+                                    SortBy
+                                )
+                        }
+                    },
+
+                    "airports": {
+
+                        "CAI":
+                            airport_info(
+                                "CAI"
+                            ),
+
+                        "JED":
+                            airport_info(
+                                "JED"
+                            ),
+
+                        "DXB":
+                            airport_info(
+                                "DXB"
+                            ),
+
+                        "RUH":
+                            airport_info(
+                                "RUH"
+                            )
+                    }
+                }
+
+                send_json(
+                    self,
+                    200,
+                    payload
+                )
+
+            except Exception as error:
+
+                send_json(
+                    self,
+                    500,
+                    {
+                        "ok": False,
+                        "error":
+                            str(error),
+                        "traceback":
+                            traceback.format_exc()
+                    }
+                )
+
+            return
+
+        # -------------------------------------------------
+        # Not Found
+        # -------------------------------------------------
+
+        send_json(
+            self,
+            404,
+            {
+                "ok": False,
+                "error":
+                    "Not Found"
+            }
+        )
+
+    # =====================================================
+    # POST
+    # =====================================================
+
+    def do_POST(self):
+
+        path = self.path.split(
+            "?"
+        )[0]
+
+        # -------------------------------------------------
+        # Diagnostic search
+        # -------------------------------------------------
+
+        if path == "/api/diagnostic-search":
+
+            try:
+
+                search = read_json(
+                    self
+                )
+
+                from_code = str(
+                    search.get(
+                        "from",
+                        "CAI"
+                    )
+                ).strip().upper()
+
+                to_code = str(
+                    search.get(
+                        "to",
+                        "JED"
+                    )
+                ).strip().upper()
+
+                depart_date = str(
+                    search.get(
+                        "departDate",
+                        "2026-10-19"
+                    )
+                ).strip()
+
+                result = (
+                    run_diagnostic_search(
+                        from_code,
+                        to_code,
+                        depart_date
+                    )
+                )
+
+                send_json(
+                    self,
+                    200,
+                    {
+                        "ok": True,
+                        "mode":
+                            "diagnostic-only",
+                        "request": {
+                            "from":
+                                from_code,
+                            "to":
+                                to_code,
+                            "departDate":
+                                depart_date
+                        },
+                        "fliVersion":
+                            get_fli_version(),
+                        "diagnostic":
+                            result
+                    }
+                )
+
+            except Exception as error:
+
+                send_json(
+                    self,
+                    500,
+                    {
+                        "ok": False,
+                        "mode":
+                            "diagnostic-only",
+                        "error":
+                            str(error),
+                        "traceback":
+                            traceback.format_exc()
+                    }
+                )
+
+            return
+
+        # -------------------------------------------------
+        # Normal search endpoint
+        #
+        # We intentionally DO NOT run the old search here.
+        # This file is diagnostic-only.
+        # -------------------------------------------------
+
+        if path == "/api/search-flights":
+
+            send_json(
+                self,
+                200,
+                {
+                    "ok": False,
+                    "mode":
+                        "diagnostic-only",
+                    "message":
+                        "Normal flight search is disabled in diagnostic mode.",
+                    "use":
+                        "/api/diagnostic-search"
                 }
             )
 
@@ -421,264 +945,10 @@ class Handler(
             404,
             {
                 "ok": False,
-                "error": "Not Found"
+                "error":
+                    "Not Found"
             }
         )
-
-    # =====================================================
-    # POST
-    # =====================================================
-
-    def do_POST(self):
-
-        path = self.path.split("?")[0]
-
-        if path != "/api/search-flights":
-
-            send_json(
-                self,
-                404,
-                {
-                    "ok": False,
-                    "error": "Not Found"
-                }
-            )
-
-            return
-
-        try:
-
-            # =================================================
-            # Read Request
-            # =================================================
-
-            search = read_json(
-                self
-            )
-
-            if not search:
-
-                send_json(
-                    self,
-                    400,
-                    {
-                        "ok": False,
-                        "error":
-                            "Request body is empty"
-                    }
-                )
-
-                return
-
-            # =================================================
-            # Required Fields
-            # =================================================
-
-            from_code = str(
-                search.get(
-                    "from",
-                    ""
-                )
-            ).strip().upper()
-
-            to_code = str(
-                search.get(
-                    "to",
-                    ""
-                )
-            ).strip().upper()
-
-            depart_date = str(
-                search.get(
-                    "departDate",
-                    ""
-                )
-            ).strip()
-
-            if not from_code:
-
-                send_json(
-                    self,
-                    400,
-                    {
-                        "ok": False,
-                        "error":
-                            "Missing from airport"
-                    }
-                )
-
-                return
-
-            if not to_code:
-
-                send_json(
-                    self,
-                    400,
-                    {
-                        "ok": False,
-                        "error":
-                            "Missing to airport"
-                    }
-                )
-
-                return
-
-            if not depart_date:
-
-                send_json(
-                    self,
-                    400,
-                    {
-                        "ok": False,
-                        "error":
-                            "Missing departDate"
-                    }
-                )
-
-                return
-
-            # =================================================
-            # Build Filters
-            # =================================================
-
-            filters = build_filters(
-                search
-            )
-
-            print(
-                "======================================"
-            )
-
-            print(
-                "Fli Google Flights Search"
-            )
-
-            print(
-                json.dumps(
-                    search,
-                    ensure_ascii=False
-                )
-            )
-
-            print(
-                "======================================"
-            )
-
-            # =================================================
-            # Search
-            # =================================================
-
-            search_engine = SearchFlights()
-
-            results = search_engine.search(
-                filters,
-                top_n=MAX_RESULTS,
-                currency="EGP"
-            )
-
-            # =================================================
-            # Serialize Results
-            # =================================================
-
-            output = []
-
-            for item in results or []:
-
-                try:
-
-                    if hasattr(
-                        item,
-                        "model_dump"
-                    ):
-
-                        value = item.model_dump()
-
-                    elif hasattr(
-                        item,
-                        "dict"
-                    ):
-
-                        value = item.dict()
-
-                    elif hasattr(
-                        item,
-                        "__dict__"
-                    ):
-
-                        value = item.__dict__
-
-                    else:
-
-                        value = item
-
-                    output.append(
-                        value
-                    )
-
-                except Exception as item_error:
-
-                    print(
-                        "Could not serialize result:",
-                        item_error
-                    )
-
-            # =================================================
-            # Response
-            # =================================================
-
-            send_json(
-                self,
-                200,
-                {
-                    "ok": True,
-                    "count": len(output),
-                    "currency": "EGP",
-                    "source":
-                        "googleflights",
-                    "engine": "fli",
-                    "tripType": (
-                        "round-trip"
-                        if search.get(
-                            "returnDate"
-                        )
-                        else "one-way"
-                    ),
-                    "flights": output,
-                    "pricePolicy":
-                        "Round-trip price comes "
-                        "from the same Google Flights "
-                        "Fli itinerary. No manual "
-                        "addition of outbound and "
-                        "return prices is performed."
-                }
-            )
-
-        except Exception as error:
-
-            print(
-                "======================================"
-            )
-
-            print(
-                "SEARCH ERROR:",
-                str(error)
-            )
-
-            print(
-                "======================================"
-            )
-
-            traceback.print_exc()
-
-            send_json(
-                self,
-                500,
-                {
-                    "ok": False,
-                    "error": str(error),
-                    "engine": "fli"
-                }
-            )
 
 
 # =========================================================
@@ -696,12 +966,32 @@ def main():
     )
 
     print(
-        "Jawwak Google Flights Fli "
-        f"server running on port {PORT}"
+        "======================================"
+    )
+
+    print(
+        "Jawwak Fli Diagnostic Server"
+    )
+
+    print(
+        f"Port: {PORT}"
+    )
+
+    print(
+        f"Fli version: {get_fli_version()}"
+    )
+
+    print(
+        "Diagnostic mode ONLY"
+    )
+
+    print(
+        "======================================"
     )
 
     server.serve_forever()
 
 
 if __name__ == "__main__":
+
     main()
