@@ -1,6 +1,6 @@
 import express from "express";
 import cors from "cors";
-import { createQuery, Passengers, getFlights } from "fast-flights-ts";
+import { createQuery, Passengers, getFlights, fetchFlightsHtml, parse } from "fast-flights-ts";
 
 const app = express();
 app.use(cors());
@@ -146,10 +146,39 @@ async function search(q) {
 
   activeGoogleRequest = (async()=>{
     await rateLimit();
-    const raw = await timeout(
-      () => getFlights(buildQuery(q), {timeout:REQUEST_TIMEOUT_MS, maxRetries:1, retryDelay:1500}),
-      REQUEST_TIMEOUT_MS + 3000
-    );
+    const query = buildQuery(q);
+    let raw;
+
+    try {
+      // Primary path: Google's internal RPC endpoint.
+      raw = await timeout(
+        () => getFlights(query, {
+          timeout: REQUEST_TIMEOUT_MS,
+          maxRetries: 1,
+          retryDelay: 1500
+        }),
+        REQUEST_TIMEOUT_MS + 3000
+      );
+    } catch (rpcErr) {
+      // Google can change the RPC response shape without changing the search itself.
+      // In that case, fall back to the same Google Flights query through the HTML path.
+      console.warn(
+        "Google Flights RPC failed; trying HTML fallback:",
+        rpcErr?.message || rpcErr
+      );
+
+      const html = await timeout(
+        () => fetchFlightsHtml(query, {
+          timeout: REQUEST_TIMEOUT_MS,
+          maxRetries: 1,
+          retryDelay: 1500
+        }),
+        REQUEST_TIMEOUT_MS + 3000
+      );
+
+      raw = parse(html);
+    }
+
     const results = Array.isArray(raw) ? raw : [];
     const flights = results.map((flight, index) => mapFlight(flight, index, q)).filter(Boolean)
       .sort((a,b)=>a.price-b.price).slice(0,MAX_RESULTS);
