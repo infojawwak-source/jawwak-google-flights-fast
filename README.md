@@ -1,7 +1,5 @@
-# Jawwak Google Flights Server V4
+# Jawwak Google Flights Debug V6
 
-Round-trip safety update:
-- Never pairs a separately searched return flight with an outbound fare.
-- Accepts a round-trip result only when both outbound and return legs are present in the same parsed Google itinerary.
-- Keeps Google's returned round-trip itinerary price as the total fare.
-- Filters out zero/negative prices.
+Diagnostic-only server. It calls fast-flights-ts with a true `round-trip` query and exposes the parsed raw result structure through `/api/debug-roundtrip` so we can determine where the outbound/return itinerary and total price live.
+
+Do not connect this service to the main Jawwak frontend. After the diagnostic response is understood, build the production implementation from the observed structure.
