@@ -18,9 +18,9 @@ PORT = int(os.environ.get("PORT", "10000"))
 MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "50"))
 
 
-# =========================
+# =========================================================
 # CORS
-# =========================
+# =========================================================
 
 def add_cors(handler):
     handler.send_header(
@@ -63,13 +63,18 @@ def send_json(handler, status_code, payload):
 
 def read_json(handler):
     content_length = int(
-        handler.headers.get("Content-Length", "0")
+        handler.headers.get(
+            "Content-Length",
+            "0"
+        )
     )
 
     if content_length <= 0:
         return {}
 
-    raw = handler.rfile.read(content_length)
+    raw = handler.rfile.read(
+        content_length
+    )
 
     if not raw:
         return {}
@@ -79,21 +84,28 @@ def read_json(handler):
     )
 
 
-# =========================
+# =========================================================
 # Cabin
-# =========================
+# =========================================================
 
 def normalize_cabin(value):
+
     value = str(
         value or "economy"
     ).strip().lower()
 
     if value == "business":
-        if hasattr(SeatType, "BUSINESS"):
+        if hasattr(
+            SeatType,
+            "BUSINESS"
+        ):
             return SeatType.BUSINESS
 
     if value == "first":
-        if hasattr(SeatType, "FIRST"):
+        if hasattr(
+            SeatType,
+            "FIRST"
+        ):
             return SeatType.FIRST
 
     if value in (
@@ -109,11 +121,12 @@ def normalize_cabin(value):
     return SeatType.ECONOMY
 
 
-# =========================
+# =========================================================
 # Sort
-# =========================
+# =========================================================
 
 def normalize_sort(value):
+
     value = str(
         value or "cheapest"
     ).strip().lower()
@@ -142,68 +155,104 @@ def normalize_sort(value):
     return SortBy.CHEAPEST
 
 
-# =========================
+# =========================================================
 # Airport
-# =========================
+# =========================================================
 
-def make_airport(code):
-    """
-    Fli 0.9.0 expects Airport to be
-    constructed from the airport code
-    as an Enum value, not Airport(code=...).
-    """
+def get_airport(code):
 
     code = str(
         code or ""
     ).strip().upper()
 
+    if not code:
+        raise ValueError(
+            "Airport code is empty"
+        )
+
     try:
-        return Airport(code)
+        return getattr(
+            Airport,
+            code
+        )
 
-    except Exception:
+    except AttributeError:
 
-        # Some versions may expose the
-        # airport enum using the code as
-        # an attribute.
-        if hasattr(Airport, code):
-            return getattr(Airport, code)
-
-        raise
+        raise ValueError(
+            f"Unsupported airport code: {code}"
+        )
 
 
-# =========================
+# =========================================================
 # Build Filters
-# =========================
+# =========================================================
 
 def build_filters(search):
 
     from_code = str(
-        search.get("from", "")
+        search.get(
+            "from",
+            ""
+        )
     ).strip().upper()
 
     to_code = str(
-        search.get("to", "")
+        search.get(
+            "to",
+            ""
+        )
     ).strip().upper()
 
     depart_date = str(
-        search.get("departDate", "")
+        search.get(
+            "departDate",
+            ""
+        )
     ).strip()
 
     return_date = str(
-        search.get("returnDate", "")
+        search.get(
+            "returnDate",
+            ""
+        )
     ).strip()
 
     adults = int(
-        search.get("adults", 1) or 1
+        search.get(
+            "adults",
+            1
+        ) or 1
     )
 
     children = int(
-        search.get("children", 0) or 0
+        search.get(
+            "children",
+            0
+        ) or 0
     )
 
     infants = int(
-        search.get("infants", 0) or 0
+        search.get(
+            "infants",
+            0
+        ) or 0
     )
+
+    # =====================================================
+    # Airports
+    # =====================================================
+
+    departure_airport = get_airport(
+        from_code
+    )
+
+    arrival_airport = get_airport(
+        to_code
+    )
+
+    # =====================================================
+    # Passengers
+    # =====================================================
 
     passenger_info = PassengerInfo(
         adults=adults,
@@ -211,39 +260,55 @@ def build_filters(search):
         infants=infants
     )
 
+    # =====================================================
+    # Flight Segments
+    # =====================================================
+
     segments = []
 
-    # =========================
-    # Departure
-    # =========================
+    # -----------------------------------------------------
+    # Outbound
+    # -----------------------------------------------------
 
     outbound = FlightSegment(
-        origin=make_airport(from_code),
-        destination=make_airport(to_code),
-        date=depart_date
+        departure_airport=[
+            [departure_airport, 0]
+        ],
+        arrival_airport=[
+            [arrival_airport, 0]
+        ],
+        travel_date=depart_date
     )
 
-    segments.append(outbound)
+    segments.append(
+        outbound
+    )
 
-    # =========================
+    # -----------------------------------------------------
     # Return
-    # =========================
+    # -----------------------------------------------------
 
     if return_date:
 
         return_segment = FlightSegment(
-            origin=make_airport(to_code),
-            destination=make_airport(from_code),
-            date=return_date
+            departure_airport=[
+                [arrival_airport, 0]
+            ],
+            arrival_airport=[
+                [departure_airport, 0]
+            ],
+            travel_date=return_date
         )
 
         segments.append(
             return_segment
         )
 
-    # =========================
+    # =====================================================
     # Filters
-    # =========================
+    #
+    # MaxStops intentionally omitted.
+    # =====================================================
 
     filters = FlightSearchFilters(
         passenger_info=passenger_info,
@@ -265,11 +330,13 @@ def build_filters(search):
     return filters
 
 
-# =========================
+# =========================================================
 # HTTP Handler
-# =========================
+# =========================================================
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(
+    BaseHTTPRequestHandler
+):
 
     def log_message(
         self,
@@ -284,9 +351,9 @@ class Handler(BaseHTTPRequestHandler):
             )
         )
 
-    # =========================
+    # =====================================================
     # OPTIONS
-    # =========================
+    # =====================================================
 
     def do_OPTIONS(self):
 
@@ -296,13 +363,17 @@ class Handler(BaseHTTPRequestHandler):
 
         self.end_headers()
 
-    # =========================
+    # =====================================================
     # GET
-    # =========================
+    # =====================================================
 
     def do_GET(self):
 
         path = self.path.split("?")[0]
+
+        # -------------------------------------------------
+        # Root
+        # -------------------------------------------------
 
         if path == "/":
 
@@ -318,6 +389,10 @@ class Handler(BaseHTTPRequestHandler):
             )
 
             return
+
+        # -------------------------------------------------
+        # Health
+        # -------------------------------------------------
 
         if path == "/api/health":
 
@@ -337,6 +412,10 @@ class Handler(BaseHTTPRequestHandler):
 
             return
 
+        # -------------------------------------------------
+        # Not Found
+        # -------------------------------------------------
+
         send_json(
             self,
             404,
@@ -346,9 +425,9 @@ class Handler(BaseHTTPRequestHandler):
             }
         )
 
-    # =========================
+    # =====================================================
     # POST
-    # =========================
+    # =====================================================
 
     def do_POST(self):
 
@@ -369,7 +448,13 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
 
-            search = read_json(self)
+            # =================================================
+            # Read Request
+            # =================================================
+
+            search = read_json(
+                self
+            )
 
             if not search:
 
@@ -385,20 +470,29 @@ class Handler(BaseHTTPRequestHandler):
 
                 return
 
-            # =========================
-            # Required fields
-            # =========================
+            # =================================================
+            # Required Fields
+            # =================================================
 
             from_code = str(
-                search.get("from", "")
+                search.get(
+                    "from",
+                    ""
+                )
             ).strip().upper()
 
             to_code = str(
-                search.get("to", "")
+                search.get(
+                    "to",
+                    ""
+                )
             ).strip().upper()
 
             depart_date = str(
-                search.get("departDate", "")
+                search.get(
+                    "departDate",
+                    ""
+                )
             ).strip()
 
             if not from_code:
@@ -443,14 +537,20 @@ class Handler(BaseHTTPRequestHandler):
 
                 return
 
-            # =========================
-            # Build Fli filters
-            # =========================
+            # =================================================
+            # Build Filters
+            # =================================================
 
-            filters = build_filters(search)
+            filters = build_filters(
+                search
+            )
 
             print(
-                "Searching Google Flights via Fli:"
+                "======================================"
+            )
+
+            print(
+                "Fli Google Flights Search"
             )
 
             print(
@@ -460,9 +560,13 @@ class Handler(BaseHTTPRequestHandler):
                 )
             )
 
-            # =========================
+            print(
+                "======================================"
+            )
+
+            # =================================================
             # Search
-            # =========================
+            # =================================================
 
             search_engine = SearchFlights()
 
@@ -472,9 +576,9 @@ class Handler(BaseHTTPRequestHandler):
                 currency="EGP"
             )
 
-            # =========================
-            # Serialize
-            # =========================
+            # =================================================
+            # Serialize Results
+            # =================================================
 
             output = []
 
@@ -486,24 +590,30 @@ class Handler(BaseHTTPRequestHandler):
                         item,
                         "model_dump"
                     ):
+
                         value = item.model_dump()
 
                     elif hasattr(
                         item,
                         "dict"
                     ):
+
                         value = item.dict()
 
                     elif hasattr(
                         item,
                         "__dict__"
                     ):
+
                         value = item.__dict__
 
                     else:
+
                         value = item
 
-                    output.append(value)
+                    output.append(
+                        value
+                    )
 
                 except Exception as item_error:
 
@@ -512,9 +622,9 @@ class Handler(BaseHTTPRequestHandler):
                         item_error
                     )
 
-            # =========================
+            # =================================================
             # Response
-            # =========================
+            # =================================================
 
             send_json(
                 self,
@@ -535,19 +645,27 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                     "flights": output,
                     "pricePolicy":
-                        "Round-trip price is taken "
+                        "Round-trip price comes "
                         "from the same Google Flights "
                         "Fli itinerary. No manual "
-                        "addition of outbound and return "
-                        "prices is performed."
+                        "addition of outbound and "
+                        "return prices is performed."
                 }
             )
 
         except Exception as error:
 
             print(
+                "======================================"
+            )
+
+            print(
                 "SEARCH ERROR:",
                 str(error)
+            )
+
+            print(
+                "======================================"
             )
 
             traceback.print_exc()
@@ -563,14 +681,17 @@ class Handler(BaseHTTPRequestHandler):
             )
 
 
-# =========================
-# Start
-# =========================
+# =========================================================
+# Start Server
+# =========================================================
 
 def main():
 
     server = ThreadingHTTPServer(
-        ("0.0.0.0", PORT),
+        (
+            "0.0.0.0",
+            PORT
+        ),
         Handler
     )
 
