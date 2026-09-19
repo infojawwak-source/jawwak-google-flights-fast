@@ -1,18 +1,7 @@
-# Jawwak Google Flights Server
+# Jawwak Google Flights Server V4
 
-Standalone Google Flights search service for Jawwak.
-
-## Search strategy
-
-The server first uses `fast-flights-ts`'s direct Google Flights RPC path. If Google returns an RPC response that the current parser cannot decode, the server automatically retries the same structured query through the library's HTML parsing path. This avoids depending on a single Google response format.
-
-The service is search-only. It does not book or ticket flights.
-
-## Endpoints
-
-- `GET /api/health`
-- `POST /api/search-flights`
-
-## Authentication
-
-Set `JAWAKK_GOOGLE_FLIGHTS_API_KEY` in Render. Clients must send the same value in the `x-api-key` header.
+Round-trip safety update:
+- Never pairs a separately searched return flight with an outbound fare.
+- Accepts a round-trip result only when both outbound and return legs are present in the same parsed Google itinerary.
+- Keeps Google's returned round-trip itinerary price as the total fare.
+- Filters out zero/negative prices.
