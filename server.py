@@ -172,6 +172,26 @@ def search_google(q):
 
 class Handler(BaseHTTPRequestHandler):
 
+    # =========================
+    # CORS
+    # =========================
+
+    def _cors(self):
+        self.send_header(
+            "Access-Control-Allow-Origin",
+            "*"
+        )
+
+        self.send_header(
+            "Access-Control-Allow-Methods",
+            "GET, POST, OPTIONS"
+        )
+
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, x-api-key"
+        )
+
     def _send(self, code, payload):
         raw = json.dumps(
             payload,
@@ -180,6 +200,8 @@ class Handler(BaseHTTPRequestHandler):
         ).encode("utf-8")
 
         self.send_response(code)
+
+        self._cors()
 
         self.send_header(
             "Content-Type",
@@ -201,10 +223,17 @@ class Handler(BaseHTTPRequestHandler):
 
         supplied = self.headers.get(
             "x-api-key",
-            "",
+            ""
         ).strip()
 
         return supplied == API_KEY
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+
+        self._cors()
+
+        self.end_headers()
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -264,7 +293,7 @@ class Handler(BaseHTTPRequestHandler):
             length = int(
                 self.headers.get(
                     "Content-Length",
-                    "0",
+                    "0"
                 )
             )
 
@@ -358,5 +387,5 @@ if __name__ == "__main__":
 
     ThreadingHTTPServer(
         ("0.0.0.0", PORT),
-        Handler,
+        Handler
     ).serve_forever()
