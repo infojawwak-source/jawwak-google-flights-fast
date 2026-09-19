@@ -192,6 +192,10 @@ class Handler(BaseHTTPRequestHandler):
             "Content-Type, x-api-key"
         )
 
+    # =========================
+    # SEND RESPONSE
+    # =========================
+
     def _send(self, code, payload):
         raw = json.dumps(
             payload,
@@ -217,8 +221,20 @@ class Handler(BaseHTTPRequestHandler):
 
         self.wfile.write(raw)
 
+    # =========================
+    # AUTH CHECK
+    # =========================
+
     def _authorized(self):
+
         if not API_KEY:
+            self._auth_debug = {
+                "configured": False,
+                "headerReceived": False,
+                "configuredKeyLength": 0,
+                "receivedKeyLength": 0,
+            }
+
             return True
 
         supplied = self.headers.get(
@@ -226,16 +242,46 @@ class Handler(BaseHTTPRequestHandler):
             ""
         ).strip()
 
-        return supplied == API_KEY
+        if supplied == API_KEY:
+
+            self._auth_debug = {
+                "configured": True,
+                "headerReceived": True,
+                "configuredKeyLength": len(API_KEY),
+                "receivedKeyLength": len(supplied),
+                "match": True,
+            }
+
+            return True
+
+        self._auth_debug = {
+            "configured": True,
+            "headerReceived": bool(supplied),
+            "configuredKeyLength": len(API_KEY),
+            "receivedKeyLength": len(supplied),
+            "match": False,
+        }
+
+        return False
+
+    # =========================
+    # OPTIONS / CORS PREFLIGHT
+    # =========================
 
     def do_OPTIONS(self):
+
         self.send_response(204)
 
         self._cors()
 
         self.end_headers()
 
+    # =========================
+    # GET
+    # =========================
+
     def do_GET(self):
+
         path = urlparse(self.path).path
 
         if path == "/api/health":
@@ -261,7 +307,12 @@ class Handler(BaseHTTPRequestHandler):
             },
         )
 
+    # =========================
+    # POST SEARCH
+    # =========================
+
     def do_POST(self):
+
         path = urlparse(self.path).path
 
         if path != "/api/search-flights":
@@ -276,6 +327,10 @@ class Handler(BaseHTTPRequestHandler):
 
             return
 
+        # -------------------------
+        # Authorization
+        # -------------------------
+
         if not self._authorized():
 
             self._send(
@@ -283,10 +338,22 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "ok": False,
                     "error": "Unauthorized",
+                    "authDebug": getattr(
+                        self,
+                        "_auth_debug",
+                        {
+                            "configured": bool(API_KEY),
+                            "headerReceived": False,
+                        },
+                    ),
                 },
             )
 
             return
+
+        # -------------------------
+        # Search
+        # -------------------------
 
         try:
 
@@ -316,6 +383,7 @@ class Handler(BaseHTTPRequestHandler):
             ]
 
             if missing:
+
                 raise ValueError(
                     "Missing required fields: "
                     + ", ".join(missing)
