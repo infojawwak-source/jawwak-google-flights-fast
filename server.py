@@ -23,38 +23,40 @@ MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "50"))
 # =========================
 
 def add_cors(handler):
-    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header(
+        "Access-Control-Allow-Origin",
+        "*"
+    )
     handler.send_header(
         "Access-Control-Allow-Methods",
-        "GET, POST, OPTIONS",
+        "GET, POST, OPTIONS"
     )
     handler.send_header(
         "Access-Control-Allow-Headers",
-        "Content-Type, Accept",
+        "Content-Type, Accept"
     )
 
-
-# =========================
-# Helpers
-# =========================
 
 def send_json(handler, status_code, payload):
     body = json.dumps(
         payload,
         ensure_ascii=False,
-        default=str,
+        default=str
     ).encode("utf-8")
 
     handler.send_response(status_code)
     add_cors(handler)
+
     handler.send_header(
         "Content-Type",
-        "application/json; charset=utf-8",
+        "application/json; charset=utf-8"
     )
+
     handler.send_header(
         "Content-Length",
-        str(len(body)),
+        str(len(body))
     )
+
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -72,11 +74,19 @@ def read_json(handler):
     if not raw:
         return {}
 
-    return json.loads(raw.decode("utf-8"))
+    return json.loads(
+        raw.decode("utf-8")
+    )
 
+
+# =========================
+# Cabin
+# =========================
 
 def normalize_cabin(value):
-    value = str(value or "economy").strip().lower()
+    value = str(
+        value or "economy"
+    ).strip().lower()
 
     if value == "business":
         if hasattr(SeatType, "BUSINESS"):
@@ -86,26 +96,47 @@ def normalize_cabin(value):
         if hasattr(SeatType, "FIRST"):
             return SeatType.FIRST
 
-    if value in ("premium_economy", "premium"):
-        if hasattr(SeatType, "PREMIUM_ECONOMY"):
+    if value in (
+        "premium_economy",
+        "premium"
+    ):
+        if hasattr(
+            SeatType,
+            "PREMIUM_ECONOMY"
+        ):
             return SeatType.PREMIUM_ECONOMY
 
     return SeatType.ECONOMY
 
 
+# =========================
+# Sort
+# =========================
+
 def normalize_sort(value):
-    value = str(value or "cheapest").strip().lower()
+    value = str(
+        value or "cheapest"
+    ).strip().lower()
 
     if value == "duration":
-        if hasattr(SortBy, "DURATION"):
+        if hasattr(
+            SortBy,
+            "DURATION"
+        ):
             return SortBy.DURATION
 
     if value == "departure_time":
-        if hasattr(SortBy, "DEPARTURE_TIME"):
+        if hasattr(
+            SortBy,
+            "DEPARTURE_TIME"
+        ):
             return SortBy.DEPARTURE_TIME
 
     if value == "arrival_time":
-        if hasattr(SortBy, "ARRIVAL_TIME"):
+        if hasattr(
+            SortBy,
+            "ARRIVAL_TIME"
+        ):
             return SortBy.ARRIVAL_TIME
 
     return SortBy.CHEAPEST
@@ -116,18 +147,36 @@ def normalize_sort(value):
 # =========================
 
 def make_airport(code):
-    code = str(code or "").strip().upper()
+    """
+    Fli 0.9.0 expects Airport to be
+    constructed from the airport code
+    as an Enum value, not Airport(code=...).
+    """
 
-    return Airport(
-        code=code,
-    )
+    code = str(
+        code or ""
+    ).strip().upper()
+
+    try:
+        return Airport(code)
+
+    except Exception:
+
+        # Some versions may expose the
+        # airport enum using the code as
+        # an attribute.
+        if hasattr(Airport, code):
+            return getattr(Airport, code)
+
+        raise
 
 
 # =========================
-# Build Fli filters
+# Build Filters
 # =========================
 
 def build_filters(search):
+
     from_code = str(
         search.get("from", "")
     ).strip().upper()
@@ -156,30 +205,22 @@ def build_filters(search):
         search.get("infants", 0) or 0
     )
 
-    cabin = normalize_cabin(
-        search.get("cabin", "economy")
-    )
-
-    sort_by = normalize_sort(
-        search.get("sort", "cheapest")
-    )
-
     passenger_info = PassengerInfo(
         adults=adults,
         children=children,
-        infants=infants,
+        infants=infants
     )
 
     segments = []
 
     # =========================
-    # Outbound
+    # Departure
     # =========================
 
     outbound = FlightSegment(
         origin=make_airport(from_code),
         destination=make_airport(to_code),
-        date=depart_date,
+        date=depart_date
     )
 
     segments.append(outbound)
@@ -189,29 +230,36 @@ def build_filters(search):
     # =========================
 
     if return_date:
+
         return_segment = FlightSegment(
             origin=make_airport(to_code),
             destination=make_airport(from_code),
-            date=return_date,
+            date=return_date
         )
 
-        segments.append(return_segment)
+        segments.append(
+            return_segment
+        )
 
-    # IMPORTANT:
-    # Do NOT pass stops here.
-    #
-    # Some Fli 0.9.0 runtime versions do not expose
-    # MaxStops.ONE_STOP even though the documentation
-    # mentions it.
-    #
-    # Leaving stops unspecified allows Fli/Google Flights
-    # to return the available options normally.
+    # =========================
+    # Filters
+    # =========================
 
     filters = FlightSearchFilters(
         passenger_info=passenger_info,
         flight_segments=segments,
-        seat_type=cabin,
-        sort_by=sort_by,
+        seat_type=normalize_cabin(
+            search.get(
+                "cabin",
+                "economy"
+            )
+        ),
+        sort_by=normalize_sort(
+            search.get(
+                "sort",
+                "cheapest"
+            )
+        )
     )
 
     return filters
@@ -223,22 +271,29 @@ def build_filters(search):
 
 class Handler(BaseHTTPRequestHandler):
 
-    def log_message(self, format, *args):
+    def log_message(
+        self,
+        format,
+        *args
+    ):
         print(
             "%s - %s"
             % (
                 self.address_string(),
-                format % args,
+                format % args
             )
         )
 
     # =========================
-    # OPTIONS / CORS
+    # OPTIONS
     # =========================
 
     def do_OPTIONS(self):
+
         self.send_response(204)
+
         add_cors(self)
+
         self.end_headers()
 
     # =========================
@@ -250,29 +305,36 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
 
         if path == "/":
+
             send_json(
                 self,
                 200,
                 {
                     "ok": True,
-                    "service": "jawwak-google-flights-fli",
-                    "engine": "fli",
-                },
+                    "service":
+                        "jawwak-google-flights-fli",
+                    "engine": "fli"
+                }
             )
+
             return
 
         if path == "/api/health":
+
             send_json(
                 self,
                 200,
                 {
                     "ok": True,
-                    "service": "jawwak-google-flights-fli",
+                    "service":
+                        "jawwak-google-flights-fli",
                     "engine": "fli",
-                    "roundTripEngine": "direct-google-rpc",
-                    "apiKeyRequired": False,
-                },
+                    "roundTripEngine":
+                        "direct-google-rpc",
+                    "apiKeyRequired": False
+                }
             )
+
             return
 
         send_json(
@@ -280,8 +342,8 @@ class Handler(BaseHTTPRequestHandler):
             404,
             {
                 "ok": False,
-                "error": "Not Found",
-            },
+                "error": "Not Found"
+            }
         )
 
     # =========================
@@ -293,14 +355,16 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
 
         if path != "/api/search-flights":
+
             send_json(
                 self,
                 404,
                 {
                     "ok": False,
-                    "error": "Not Found",
-                },
+                    "error": "Not Found"
+                }
             )
+
             return
 
         try:
@@ -308,18 +372,21 @@ class Handler(BaseHTTPRequestHandler):
             search = read_json(self)
 
             if not search:
+
                 send_json(
                     self,
                     400,
                     {
                         "ok": False,
-                        "error": "Request body is empty",
-                    },
+                        "error":
+                            "Request body is empty"
+                    }
                 )
+
                 return
 
             # =========================
-            # Validate required fields
+            # Required fields
             # =========================
 
             from_code = str(
@@ -335,50 +402,62 @@ class Handler(BaseHTTPRequestHandler):
             ).strip()
 
             if not from_code:
+
                 send_json(
                     self,
                     400,
                     {
                         "ok": False,
-                        "error": "Missing from airport",
-                    },
+                        "error":
+                            "Missing from airport"
+                    }
                 )
+
                 return
 
             if not to_code:
+
                 send_json(
                     self,
                     400,
                     {
                         "ok": False,
-                        "error": "Missing to airport",
-                    },
+                        "error":
+                            "Missing to airport"
+                    }
                 )
+
                 return
 
             if not depart_date:
+
                 send_json(
                     self,
                     400,
                     {
                         "ok": False,
-                        "error": "Missing departDate",
-                    },
+                        "error":
+                            "Missing departDate"
+                    }
                 )
+
                 return
 
             # =========================
-            # Build filters
+            # Build Fli filters
             # =========================
 
             filters = build_filters(search)
 
             print(
-                "Searching Google Flights via Fli:",
+                "Searching Google Flights via Fli:"
+            )
+
+            print(
                 json.dumps(
                     search,
-                    ensure_ascii=False,
-                ),
+                    ensure_ascii=False
+                )
             )
 
             # =========================
@@ -390,11 +469,11 @@ class Handler(BaseHTTPRequestHandler):
             results = search_engine.search(
                 filters,
                 top_n=MAX_RESULTS,
-                currency="EGP",
+                currency="EGP"
             )
 
             # =========================
-            # Convert results to JSON
+            # Serialize
             # =========================
 
             output = []
@@ -402,13 +481,23 @@ class Handler(BaseHTTPRequestHandler):
             for item in results or []:
 
                 try:
-                    if hasattr(item, "model_dump"):
+
+                    if hasattr(
+                        item,
+                        "model_dump"
+                    ):
                         value = item.model_dump()
 
-                    elif hasattr(item, "dict"):
+                    elif hasattr(
+                        item,
+                        "dict"
+                    ):
                         value = item.dict()
 
-                    elif hasattr(item, "__dict__"):
+                    elif hasattr(
+                        item,
+                        "__dict__"
+                    ):
                         value = item.__dict__
 
                     else:
@@ -420,7 +509,7 @@ class Handler(BaseHTTPRequestHandler):
 
                     print(
                         "Could not serialize result:",
-                        item_error,
+                        item_error
                     )
 
             # =========================
@@ -434,29 +523,31 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": True,
                     "count": len(output),
                     "currency": "EGP",
-                    "source": "googleflights",
+                    "source":
+                        "googleflights",
                     "engine": "fli",
                     "tripType": (
                         "round-trip"
-                        if search.get("returnDate")
+                        if search.get(
+                            "returnDate"
+                        )
                         else "one-way"
                     ),
                     "flights": output,
-                    "pricePolicy": (
+                    "pricePolicy":
                         "Round-trip price is taken "
                         "from the same Google Flights "
                         "Fli itinerary. No manual "
                         "addition of outbound and return "
                         "prices is performed."
-                    ),
-                },
+                }
             )
 
         except Exception as error:
 
             print(
                 "SEARCH ERROR:",
-                str(error),
+                str(error)
             )
 
             traceback.print_exc()
@@ -467,24 +558,25 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "ok": False,
                     "error": str(error),
-                    "engine": "fli",
-                },
+                    "engine": "fli"
+                }
             )
 
 
 # =========================
-# Start Server
+# Start
 # =========================
 
 def main():
 
     server = ThreadingHTTPServer(
         ("0.0.0.0", PORT),
-        Handler,
+        Handler
     )
 
     print(
-        f"Jawwak Google Flights Fli server running on port {PORT}"
+        "Jawwak Google Flights Fli "
+        f"server running on port {PORT}"
     )
 
     server.serve_forever()
