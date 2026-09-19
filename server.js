@@ -69,8 +69,10 @@ function buildQuery(q) {
 function mapFlight(f, i, q) {
   const segs = Array.isArray(f?.flights) ? f.flights : [];
   if (!segs.length) return null;
+
   const price = Number(f?.price);
-  if (!Number.isFinite(price) || price < 0) return null;
+  if (!Number.isFinite(price) || price <= 0) return null;
+
   const airlines = Array.isArray(f.airlines) ? f.airlines : [];
   const legs = segs.map(x => ({
     from:x?.from_airport?.code || "",
@@ -82,12 +84,20 @@ function mapFlight(f, i, q) {
     durationMinutes:Number(x?.duration) || 0,
     aircraft:x?.plane_type || null
   }));
+
+  // For a true Google round-trip result, the library can return both directions
+  // in the same `flights` array. Split them at the first arrival into the
+  // requested outbound destination. Never manufacture a return leg here.
   let outboundLegs = legs;
   let returnLegs = [];
 
   if (q?.returnDate) {
-    const splitIndex = legs.findIndex(x => String(x.to || "").toUpperCase() === String(q.to || "").toUpperCase());
-    if (splitIndex >= 0 && splitIndex < legs.length - 1) {
+    const destination = String(q.to || "").toUpperCase();
+    const splitIndex = legs.findIndex((x, idx) =>
+      idx < legs.length - 1 && String(x.to || "").toUpperCase() === destination
+    );
+
+    if (splitIndex >= 0) {
       outboundLegs = legs.slice(0, splitIndex + 1);
       returnLegs = legs.slice(splitIndex + 1);
     }
@@ -136,6 +146,46 @@ function mapFlight(f, i, q) {
   };
 }
 
+function airlineKey(flight) {
+  return (Array.isArray(flight?.airlines) ? flight.airlines : [])
+    .map(x => String(x || "").trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function attachReturnLeg(outbound, returnFlights, usedReturnIndexes) {
+  if (!outbound || outbound.returnLeg || !returnFlights.length) return outbound;
+
+  const outboundAirlines = airlineKey(outbound);
+  let index = returnFlights.findIndex((ret, i) => {
+    if (usedReturnIndexes.has(i)) return false;
+    const retAirlines = airlineKey(ret);
+    return outboundAirlines.some(a => retAirlines.includes(a));
+  });
+
+  if (index < 0) {
+    index = returnFlights.findIndex((_, i) => !usedReturnIndexes.has(i));
+  }
+
+  if (index < 0) return outbound;
+  usedReturnIndexes.add(index);
+
+  const ret = returnFlights[index];
+  return {
+    ...outbound,
+    returnLeg: {
+      from: ret.from,
+      to: ret.to,
+      depTime: ret.depTime,
+      arrTime: ret.arrTime,
+      durationMinutes: ret.durationMinutes,
+      duration: ret.duration,
+      stops: ret.stops,
+      flightNumber: ret.flightNumber || "",
+      legs: Array.isArray(ret.legs) ? ret.legs : []
+    }
+  };
+}
+
 async function search(q) {
   cleanCache();
   const k = key(q);
@@ -145,12 +195,12 @@ async function search(q) {
   if (activeGoogleRequest) await activeGoogleRequest;
 
   activeGoogleRequest = (async()=>{
+    // Primary request: use Google's actual requested trip type.
     await rateLimit();
     const query = buildQuery(q);
     let raw;
 
     try {
-      // Primary path: Google's internal RPC endpoint.
       raw = await timeout(
         () => getFlights(query, {
           timeout: REQUEST_TIMEOUT_MS,
@@ -160,8 +210,6 @@ async function search(q) {
         REQUEST_TIMEOUT_MS + 3000
       );
     } catch (rpcErr) {
-      // Google can change the RPC response shape without changing the search itself.
-      // In that case, fall back to the same Google Flights query through the HTML path.
       console.warn(
         "Google Flights RPC failed; trying HTML fallback:",
         rpcErr?.message || rpcErr
@@ -180,10 +228,86 @@ async function search(q) {
     }
 
     const results = Array.isArray(raw) ? raw : [];
-    const flights = results.map((flight, index) => mapFlight(flight, index, q)).filter(Boolean)
-      .sort((a,b)=>a.price-b.price).slice(0,MAX_RESULTS);
+    let flights = results
+      .map((flight, index) => mapFlight(flight, index, q))
+      .filter(Boolean)
+      .sort((a,b)=>a.price-b.price)
+      .slice(0,MAX_RESULTS);
 
-    const data = {ok:true,count:flights.length,currency:"EGP",cached:false,source:"googleflights",flights};
+    // Important: do not pair a random return flight when Google already
+    // supplied the round-trip itinerary. Only use the fallback if the parsed
+    // round-trip response contains no return leg at all.
+    if (q.returnDate && flights.length && !flights.some(f => f.returnLeg)) {
+      try {
+        await rateLimit();
+        const returnQuery = buildQuery({
+          ...q,
+          from:q.to,
+          to:q.from,
+          departDate:q.returnDate,
+          returnDate:null
+        });
+
+        let returnRaw;
+        try {
+          returnRaw = await timeout(
+            () => getFlights(returnQuery, {
+              timeout: REQUEST_TIMEOUT_MS,
+              maxRetries: 1,
+              retryDelay: 1500
+            }),
+            REQUEST_TIMEOUT_MS + 3000
+          );
+        } catch (returnRpcErr) {
+          console.warn(
+            "Google return RPC failed; trying HTML fallback:",
+            returnRpcErr?.message || returnRpcErr
+          );
+          const returnHtml = await timeout(
+            () => fetchFlightsHtml(returnQuery, {
+              timeout: REQUEST_TIMEOUT_MS,
+              maxRetries: 1,
+              retryDelay: 1500
+            }),
+            REQUEST_TIMEOUT_MS + 3000
+          );
+          returnRaw = parse(returnHtml);
+        }
+
+        const returnFlights = (Array.isArray(returnRaw) ? returnRaw : [])
+          .map((flight, index) => mapFlight(flight, index, {
+            ...q,
+            from:q.to,
+            to:q.from,
+            departDate:q.returnDate,
+            returnDate:null
+          }))
+          .filter(Boolean)
+          .sort((a,b)=>a.price-b.price)
+          .slice(0, MAX_RESULTS);
+
+        const usedReturnIndexes = new Set();
+        flights = flights.map(f => attachReturnLeg(f, returnFlights, usedReturnIndexes));
+      } catch (fallbackErr) {
+        // Keep the valid outbound round-trip price results rather than failing
+        // the whole search if the auxiliary return-leg lookup is unavailable.
+        console.warn(
+          "Could not attach return-leg details:",
+          fallbackErr?.message || fallbackErr
+        );
+      }
+    }
+
+    const data = {
+      ok:true,
+      count:flights.length,
+      currency:"EGP",
+      cached:false,
+      source:"googleflights",
+      tripType:q.returnDate ? "round-trip" : "one-way",
+      flights
+    };
+
     cache.set(k,{expiresAt:Date.now()+CACHE_TTL_MS,data});
     return data;
   })();
