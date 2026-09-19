@@ -57,10 +57,18 @@ async function timeout(promiseFactory, ms) {
 function buildQuery(q) {
   const flights = [{ date:q.departDate, from_airport:q.from, to_airport:q.to }];
   if (q.returnDate) flights.push({ date:q.returnDate, from_airport:q.to, to_airport:q.from });
+
+  // fast-flights-ts exposes round-trip results as outbound choices first.
+  // It does not expose Google's departure_token in its typed result.
+  // For a two-leg customer round trip, use Google's multi-city query shape
+  // so the two legs are returned inside the SAME itinerary and the price is
+  // the price attached to that complete two-leg itinerary.
+  const trip = q.returnDate ? "multi-city" : "one-way";
+
   return createQuery({
     flights,
     seat:q.cabin,
-    trip:q.returnDate ? "round-trip" : "one-way",
+    trip,
     passengers:new Passengers({adults:q.adults, children:q.children, infants_on_lap:q.infants}),
     currency:"EGP"
   });
@@ -138,7 +146,7 @@ function mapFlight(f, i, q) {
     currency:"EGP",
     originalPrice:Math.round(price),
     originalCurrency:"EGP",
-    priceType:q?.returnDate ? "google-round-trip-itinerary-total" : "google-one-way",
+    priceType:q?.returnDate ? "google-two-leg-itinerary-total" : "google-one-way",
     legs:outboundLegs,
     returnLeg:returnLegs.length ? {
       from:inboundFirst?.from || q?.to || "",
@@ -166,7 +174,9 @@ async function search(q) {
   if (activeGoogleRequest) await activeGoogleRequest;
 
   activeGoogleRequest = (async()=>{
-    // Primary request: use Google's actual requested trip type.
+    // Primary request: for round trips use a two-leg Google itinerary so the
+    // returned price belongs to the same result as both legs. This avoids
+    // separately pairing a return flight with an outbound price.
     await rateLimit();
     const query = buildQuery(q);
     let raw;
@@ -228,7 +238,7 @@ async function search(q) {
       tripType:q.returnDate ? "round-trip" : "one-way",
       flights,
       pricePolicy: q.returnDate
-        ? "Round-trip prices are accepted only from the same Google round-trip itinerary; no separate return-leg pairing is used."
+        ? "Two-leg round-trip prices are accepted only when Google returns both legs in the same itinerary; no separate return-leg pairing is used."
         : "One-way price from Google Flights."
     };
 
