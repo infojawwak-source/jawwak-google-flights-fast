@@ -1,6 +1,7 @@
 import json
 import os
 import traceback
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -12,169 +13,271 @@ from fli.models import (
     SortBy,
     FlightSearchFilters,
     FlightSegment,
-    TripType,
 )
 from fli.search import SearchFlights
 
 
-PORT = int(os.environ.get("PORT", "10000"))
-API_KEY = os.environ.get("JAWAKK_GOOGLE_FLIGHTS_API_KEY", "").strip()
-MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "50"))
+# ============================================================
+# JAWAKK — Google Flights / Fli Search Server
+# ============================================================
+
+PORT = int(os.getenv("PORT", "10000"))
+MAX_RESULTS = int(os.getenv("MAX_RESULTS", "50"))
 
 
-def enum_value(x):
-    return getattr(x, "value", x)
+# ============================================================
+# Helpers
+# ============================================================
 
+def jsonable(value):
+    """
+    Convert Fli/Pydantic/Enum/datetime objects into JSON-safe data.
+    """
+    if value is None:
+        return None
 
-def jsonable(x):
-    if x is None or isinstance(x, (str, int, float, bool)):
-        return x
+    if isinstance(value, (str, int, float, bool)):
+        return value
 
-    if isinstance(x, (list, tuple)):
-        return [jsonable(v) for v in x]
+    if isinstance(value, datetime):
+        return value.isoformat()
 
-    if isinstance(x, dict):
-        return {str(k): jsonable(v) for k, v in x.items()}
+    if isinstance(value, dict):
+        return {
+            str(k): jsonable(v)
+            for k, v in value.items()
+        }
 
-    if hasattr(x, "model_dump"):
+    if isinstance(value, (list, tuple, set)):
+        return [
+            jsonable(v)
+            for v in value
+        ]
+
+    if hasattr(value, "model_dump"):
         try:
-            return jsonable(x.model_dump(mode="json"))
+            return jsonable(value.model_dump(mode="json"))
+        except Exception:
+            try:
+                return jsonable(value.model_dump())
+            except Exception:
+                pass
+
+    if hasattr(value, "dict"):
+        try:
+            return jsonable(value.dict())
         except Exception:
             pass
 
-    if hasattr(x, "__dict__"):
-        return {
-            str(k): jsonable(v)
-            for k, v in vars(x).items()
-            if not str(k).startswith("_")
-        }
+    if hasattr(value, "value"):
+        try:
+            return jsonable(value.value)
+        except Exception:
+            pass
 
-    return str(x)
+    if hasattr(value, "__dict__"):
+        try:
+            return jsonable(vars(value))
+        except Exception:
+            pass
 
-
-def airport_enum(code):
-    code = str(code or "").upper().strip()
-
-    if not code:
-        raise ValueError("Missing airport code")
-
-    try:
-        return Airport[code]
-    except KeyError:
-        for a in Airport:
-            if str(enum_value(a)).upper() == code:
-                return a
-
-    raise ValueError(f"Unsupported IATA airport code: {code}")
+    return str(value)
 
 
-def cabin_enum(cabin):
-    c = str(cabin or "economy").lower()
+def normalize_cabin(value):
+    value = str(value or "economy").strip().lower()
 
-    if c in ("economy", "coach"):
-        return SeatType.ECONOMY
-
-    if c in ("premium_economy", "premium-economy", "premium"):
-        return getattr(
+    mapping = {
+        "economy": SeatType.ECONOMY,
+        "premium_economy": getattr(
             SeatType,
             "PREMIUM_ECONOMY",
-            SeatType.ECONOMY,
+            SeatType.ECONOMY
+        ),
+        "business": SeatType.BUSINESS,
+        "first": SeatType.FIRST,
+    }
+
+    return mapping.get(value, SeatType.ECONOMY)
+
+
+def normalize_stops(value):
+    value = str(value or "any").strip().lower()
+
+    mapping = {
+        "any": MaxStops.ANY,
+        "non_stop": MaxStops.NON_STOP,
+        "one_stop": MaxStops.ONE_STOP,
+        "two_plus_stops": MaxStops.TWO_PLUS_STOPS,
+    }
+
+    return mapping.get(value, MaxStops.ANY)
+
+
+def normalize_sort(value):
+    value = str(value or "cheapest").strip().lower()
+
+    mapping = {
+        "cheapest": SortBy.CHEAPEST,
+        "price": SortBy.CHEAPEST,
+        "duration": getattr(
+            SortBy,
+            "DURATION",
+            SortBy.CHEAPEST
+        ),
+        "departure_time": getattr(
+            SortBy,
+            "DEPARTURE_TIME",
+            SortBy.CHEAPEST
+        ),
+        "arrival_time": getattr(
+            SortBy,
+            "ARRIVAL_TIME",
+            SortBy.CHEAPEST
+        ),
+    }
+
+    return mapping.get(value, SortBy.CHEAPEST)
+
+
+def make_airport(code):
+    """
+    Fli Airport is an enum-like airport object.
+    """
+    code = str(code or "").strip().upper()
+
+    if not code:
+        raise ValueError("Airport code is required")
+
+    try:
+        return getattr(Airport, code)
+    except AttributeError:
+        raise ValueError(
+            f"Unsupported airport code: {code}"
         )
 
-    if c == "business":
-        return SeatType.BUSINESS
 
-    if c == "first":
-        return SeatType.FIRST
+def build_filters(search):
+    """
+    Build Fli FlightSearchFilters for one-way or round-trip.
+    """
 
-    raise ValueError(f"Unsupported cabin: {cabin}")
+    origin = str(search.get("from") or "").strip().upper()
+    destination = str(search.get("to") or "").strip().upper()
 
+    depart_date = str(
+        search.get("departDate") or ""
+    ).strip()
 
-def build_filters(q):
-    from_code = str(q.get("from", "")).upper().strip()
-    to_code = str(q.get("to", "")).upper().strip()
+    return_date = str(
+        search.get("returnDate") or ""
+    ).strip()
 
-    depart = str(q.get("departDate", "")).strip()
-    ret = str(q.get("returnDate") or "").strip()
+    adults = int(search.get("adults", 1) or 1)
+    children = int(search.get("children", 0) or 0)
+    infants = int(search.get("infants", 0) or 0)
 
-    adults = max(1, int(q.get("adults", 1)))
-    children = max(0, int(q.get("children", 0)))
-    infants = max(0, int(q.get("infants", 0)))
+    if not origin:
+        raise ValueError("from is required")
 
-    legs = [
+    if not destination:
+        raise ValueError("to is required")
+
+    if not depart_date:
+        raise ValueError("departDate is required")
+
+    if adults < 1:
+        adults = 1
+
+    if children < 0:
+        children = 0
+
+    if infants < 0:
+        infants = 0
+
+    # --------------------------------------------------------
+    # Validate dates
+    # --------------------------------------------------------
+
+    datetime.strptime(depart_date, "%Y-%m-%d")
+
+    if return_date:
+        datetime.strptime(return_date, "%Y-%m-%d")
+
+    # --------------------------------------------------------
+    # Airports
+    # --------------------------------------------------------
+
+    from_airport = make_airport(origin)
+    to_airport = make_airport(destination)
+
+    # --------------------------------------------------------
+    # Passenger info
+    # --------------------------------------------------------
+
+    passenger_info = PassengerInfo(
+        adults=adults,
+        children=children,
+        infants_on_lap=infants,
+    )
+
+    # --------------------------------------------------------
+    # Segments
+    # --------------------------------------------------------
+
+    segments = [
         FlightSegment(
-            departure_airport=[
-                [airport_enum(from_code), 0]
-            ],
-            arrival_airport=[
-                [airport_enum(to_code), 0]
-            ],
-            travel_date=depart,
+            departure_airport=[[from_airport, 0]],
+            arrival_airport=[[to_airport, 0]],
+            travel_date=depart_date,
         )
     ]
 
-    trip_type = (
-        TripType.ROUND_TRIP
-        if ret
-        else TripType.ONE_WAY
-    )
+    # --------------------------------------------------------
+    # Round Trip
+    # --------------------------------------------------------
 
-    if ret:
-        legs.append(
+    if return_date:
+        segments.append(
             FlightSegment(
-                departure_airport=[
-                    [airport_enum(to_code), 0]
-                ],
-                arrival_airport=[
-                    [airport_enum(from_code), 0]
-                ],
-                travel_date=ret,
+                departure_airport=[[to_airport, 0]],
+                arrival_airport=[[from_airport, 0]],
+                travel_date=return_date,
             )
         )
 
-    return FlightSearchFilters(
-        trip_type=trip_type,
+    # --------------------------------------------------------
+    # Filters
+    # --------------------------------------------------------
 
-        passenger_info=PassengerInfo(
-            adults=adults,
-            children=children,
-            infants_in_seat=0,
-            infants_on_lap=infants,
+    filters = FlightSearchFilters(
+        passenger_info=passenger_info,
+        flight_segments=segments,
+        seat_type=normalize_cabin(
+            search.get("cabin", "economy")
         ),
-
-        flight_segments=legs,
-
-        seat_type=cabin_enum(
-            q.get("cabin", "economy")
+        stops=normalize_stops(
+            search.get("stops", "any")
         ),
-
-        stops=MaxStops.ANY,
-
-        sort_by=SortBy.CHEAPEST,
-
-        show_all_results=True,
+        sort_by=normalize_sort(
+            search.get("sort", "cheapest")
+        ),
     )
 
+    return filters
 
-def search_google(q):
-    filters = build_filters(q)
 
-    searcher = SearchFlights()
-
-    results = searcher.search(
-        filters,
-        top_n=MAX_RESULTS,
-        currency="EGP",
-    ) or []
-
-    return results
-
+# ============================================================
+# HTTP Handler
+# ============================================================
 
 class Handler(BaseHTTPRequestHandler):
 
-    # =========================
+    server_version = "JawwakFli/1.0"
+
+    # --------------------------------------------------------
     # CORS
-    # =========================
+    # --------------------------------------------------------
 
     def _cors(self):
         self.send_header(
@@ -189,271 +292,317 @@ class Handler(BaseHTTPRequestHandler):
 
         self.send_header(
             "Access-Control-Allow-Headers",
-            "Content-Type, x-api-key"
+            "Content-Type, Accept"
         )
 
-    # =========================
-    # SEND RESPONSE
-    # =========================
+    # --------------------------------------------------------
+    # Send JSON
+    # --------------------------------------------------------
 
-    def _send(self, code, payload):
-        raw = json.dumps(
+    def _send_json(self, status, payload):
+
+        body = json.dumps(
             payload,
             ensure_ascii=False,
-            default=jsonable,
+            default=jsonable
         ).encode("utf-8")
 
-        self.send_response(code)
+        self.send_response(status)
 
         self._cors()
 
         self.send_header(
             "Content-Type",
-            "application/json; charset=utf-8",
+            "application/json; charset=utf-8"
         )
 
         self.send_header(
             "Content-Length",
-            str(len(raw)),
+            str(len(body))
         )
 
         self.end_headers()
 
-        self.wfile.write(raw)
+        self.wfile.write(body)
 
-    # =========================
-    # AUTH CHECK
-    # =========================
-
-    def _authorized(self):
-
-        if not API_KEY:
-            self._auth_debug = {
-                "configured": False,
-                "headerReceived": False,
-                "configuredKeyLength": 0,
-                "receivedKeyLength": 0,
-            }
-
-            return True
-
-        supplied = self.headers.get(
-            "x-api-key",
-            ""
-        ).strip()
-
-        if supplied == API_KEY:
-
-            self._auth_debug = {
-                "configured": True,
-                "headerReceived": True,
-                "configuredKeyLength": len(API_KEY),
-                "receivedKeyLength": len(supplied),
-                "match": True,
-            }
-
-            return True
-
-        self._auth_debug = {
-            "configured": True,
-            "headerReceived": bool(supplied),
-            "configuredKeyLength": len(API_KEY),
-            "receivedKeyLength": len(supplied),
-            "match": False,
-        }
-
-        return False
-
-    # =========================
-    # OPTIONS / CORS PREFLIGHT
-    # =========================
+    # --------------------------------------------------------
+    # OPTIONS
+    # --------------------------------------------------------
 
     def do_OPTIONS(self):
-
         self.send_response(204)
 
         self._cors()
 
         self.end_headers()
 
-    # =========================
+    # --------------------------------------------------------
     # GET
-    # =========================
+    # --------------------------------------------------------
 
     def do_GET(self):
 
-        path = urlparse(self.path).path
+        path = urlparse(
+            self.path
+        ).path
+
+        # ----------------------------------------------------
+        # Health
+        # ----------------------------------------------------
 
         if path == "/api/health":
 
-            self._send(
+            self._send_json(
                 200,
                 {
                     "ok": True,
                     "service": "jawwak-google-flights-fli",
                     "engine": "fli",
                     "roundTripEngine": "direct-google-rpc",
-                    "apiKeyRequired": bool(API_KEY),
-                },
+                    "apiKeyRequired": False,
+                }
             )
 
             return
 
-        self._send(
+        # ----------------------------------------------------
+        # Root
+        # ----------------------------------------------------
+
+        if path == "/":
+
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "service": "jawwak-google-flights-fli",
+                    "message": "Jawwak Google Flights service is running.",
+                }
+            )
+
+            return
+
+        # ----------------------------------------------------
+        # Not Found
+        # ----------------------------------------------------
+
+        self._send_json(
             404,
             {
                 "ok": False,
-                "error": "Not found",
-            },
+                "error": "Not Found"
+            }
         )
 
-    # =========================
-    # POST SEARCH
-    # =========================
+    # --------------------------------------------------------
+    # POST
+    # --------------------------------------------------------
 
     def do_POST(self):
 
-        path = urlparse(self.path).path
+        path = urlparse(
+            self.path
+        ).path
 
         if path != "/api/search-flights":
 
-            self._send(
+            self._send_json(
                 404,
                 {
                     "ok": False,
-                    "error": "Not found",
-                },
+                    "error": "Not Found"
+                }
             )
 
             return
 
-        # -------------------------
-        # Authorization
-        # -------------------------
-
-        if not self._authorized():
-
-            self._send(
-                401,
-                {
-                    "ok": False,
-                    "error": "Unauthorized",
-                    "authDebug": getattr(
-                        self,
-                        "_auth_debug",
-                        {
-                            "configured": bool(API_KEY),
-                            "headerReceived": False,
-                        },
-                    ),
-                },
-            )
-
-            return
-
-        # -------------------------
-        # Search
-        # -------------------------
+        # ----------------------------------------------------
+        # Read body
+        # ----------------------------------------------------
 
         try:
 
-            length = int(
+            content_length = int(
                 self.headers.get(
                     "Content-Length",
                     "0"
                 )
             )
 
-            body = self.rfile.read(length)
-
-            q = json.loads(
-                body.decode("utf-8") or "{}"
+            raw_body = self.rfile.read(
+                content_length
             )
 
-            required = [
-                "from",
-                "to",
-                "departDate",
-            ]
+            body = json.loads(
+                raw_body.decode("utf-8")
+            )
 
-            missing = [
-                k
-                for k in required
-                if not q.get(k)
-            ]
+        except Exception:
 
-            if missing:
+            self._send_json(
+                400,
+                {
+                    "ok": False,
+                    "error": "Invalid JSON body"
+                }
+            )
 
-                raise ValueError(
-                    "Missing required fields: "
-                    + ", ".join(missing)
-                )
+            return
 
-            results = search_google(q)
+        # ----------------------------------------------------
+        # Search
+        # ----------------------------------------------------
+
+        try:
+
+            filters = build_filters(body)
+
+            trip_type = (
+                "round-trip"
+                if body.get("returnDate")
+                else "one-way"
+            )
+
+            print(
+                "=================================================="
+            )
+
+            print(
+                "[Jawwak] New flight search"
+            )
+
+            print(
+                f"[Jawwak] From: {body.get('from')}"
+            )
+
+            print(
+                f"[Jawwak] To: {body.get('to')}"
+            )
+
+            print(
+                f"[Jawwak] Departure: {body.get('departDate')}"
+            )
+
+            print(
+                f"[Jawwak] Return: {body.get('returnDate')}"
+            )
+
+            print(
+                f"[Jawwak] Trip type: {trip_type}"
+            )
+
+            print(
+                "=================================================="
+            )
+
+            # ------------------------------------------------
+            # Fli Search
+            # ------------------------------------------------
+
+            search_engine = SearchFlights()
+
+            results = search_engine.search(
+                filters,
+                top_n=MAX_RESULTS,
+                currency="EGP",
+            )
+
+            results = list(results or [])
+
+            # ------------------------------------------------
+            # JSON conversion
+            # ------------------------------------------------
 
             flights = [
-                jsonable(x)
-                for x in results
+                jsonable(item)
+                for item in results
             ]
 
-            is_round_trip = bool(
-                q.get("returnDate")
-            )
+            # ------------------------------------------------
+            # Response
+            # ------------------------------------------------
 
-            self._send(
+            response = {
+                "ok": True,
+                "count": len(flights),
+                "currency": "EGP",
+                "cached": False,
+                "source": "googleflights",
+                "engine": "fli",
+                "tripType": trip_type,
+
+                "pricePolicy": (
+                    "Price is taken from the same "
+                    "Fli Google Flights itinerary; "
+                    "no separate return search and "
+                    "no manual price summation is used."
+                ),
+
+                "flights": flights,
+            }
+
+            self._send_json(
                 200,
-                {
-                    "ok": True,
-
-                    "count": len(flights),
-
-                    "currency": "EGP",
-
-                    "cached": False,
-
-                    "source": "googleflights",
-
-                    "engine": "fli",
-
-                    "tripType": (
-                        "round-trip"
-                        if is_round_trip
-                        else "one-way"
-                    ),
-
-                    "pricePolicy": (
-                        "Price is taken from the same "
-                        "fli Google Flights itinerary; "
-                        "no separate return search or "
-                        "manual price summation is used."
-                    ),
-
-                    "flights": flights,
-                },
+                response
             )
 
         except Exception as exc:
 
-            traceback.print_exc()
+            print(
+                "[Jawwak] Search error:"
+            )
 
-            self._send(
+            print(
+                traceback.format_exc()
+            )
+
+            self._send_json(
                 500,
                 {
                     "ok": False,
                     "error": str(exc),
-                    "type": type(exc).__name__,
-                },
+                    "engine": "fli",
+                }
             )
 
 
-if __name__ == "__main__":
+# ============================================================
+# Start Server
+# ============================================================
 
-    print(
-        f"Jawwak Google Flights fli server "
-        f"listening on port {PORT}"
-    )
+def main():
 
-    ThreadingHTTPServer(
+    server = ThreadingHTTPServer(
         ("0.0.0.0", PORT),
         Handler
-    ).serve_forever()
+    )
+
+    print(
+        "=================================================="
+    )
+
+    print(
+        "Jawwak Google Flights Fli server"
+    )
+
+    print(
+        f"Listening on port {PORT}"
+    )
+
+    print(
+        "API Key authentication: DISABLED"
+    )
+
+    print(
+        f"MAX_RESULTS: {MAX_RESULTS}"
+    )
+
+    print(
+        "=================================================="
+    )
+
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
