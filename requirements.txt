@@ -1,1 +1,1 @@
-flights @ git+https://github.com/punitarani/fli.git@main
+swoop-flights
