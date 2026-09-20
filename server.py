@@ -1,127 +1,74 @@
-import os
 import json
-import traceback
-import platform
+import os
 import sys
-
+import platform
+import traceback
+import inspect
+import socket
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
 
-from fli.models import (
-    Airport,
-    PassengerInfo,
-    SeatType,
-    MaxStops,
-    SortBy,
-    FlightSearchFilters,
-    FlightSegment,
-)
+# =========================================================
+# FLI IMPORT
+# =========================================================
 
-from fli.search import SearchFlights
+try:
+    import fli
 
+    from fli.models import (
+        Airport,
+        PassengerInfo,
+        SeatType,
+        FlightSearchFilters,
+        FlightSegment,
+    )
+
+    from fli.search import SearchFlights
+
+    FLI_IMPORT_OK = True
+    FLI_IMPORT_ERROR = None
+
+except Exception as e:
+    FLI_IMPORT_OK = False
+    FLI_IMPORT_ERROR = repr(e)
 
 # =========================================================
 # CONFIG
 # =========================================================
 
-PORT = int(
-    os.environ.get(
-        "PORT",
-        "10000"
-    )
-)
-
-TEST_TOP_N = 5
-
+PORT = int(os.environ.get("PORT", "10000"))
+MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "20"))
 
 # =========================================================
 # CORS
 # =========================================================
 
-def add_cors(handler):
-
-    handler.send_header(
-        "Access-Control-Allow-Origin",
-        "*"
-    )
-
-    handler.send_header(
-        "Access-Control-Allow-Methods",
-        "GET, POST, OPTIONS"
-    )
-
-    handler.send_header(
-        "Access-Control-Allow-Headers",
-        "Content-Type, Accept"
-    )
+def cors_headers():
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Accept",
+    }
 
 
-# =========================================================
-# JSON RESPONSE
-# =========================================================
-
-def send_json(
-    handler,
-    status_code,
-    payload
-):
-
+def send_json(handler, payload, status=200):
     body = json.dumps(
         payload,
         ensure_ascii=False,
-        default=str
+        default=str,
     ).encode("utf-8")
 
-    handler.send_response(
-        status_code
-    )
+    handler.send_response(status)
 
-    add_cors(
-        handler
-    )
+    for key, value in cors_headers().items():
+        handler.send_header(key, value)
 
-    handler.send_header(
-        "Content-Type",
-        "application/json; charset=utf-8"
-    )
-
-    handler.send_header(
-        "Content-Length",
-        str(len(body))
-    )
-
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
 
-    handler.wfile.write(
-        body
-    )
-
-
-# =========================================================
-# READ JSON
-# =========================================================
-
-def read_json(handler):
-
-    length = int(
-        handler.headers.get(
-            "Content-Length",
-            "0"
-        )
-    )
-
-    if length <= 0:
-        return {}
-
-    raw = handler.rfile.read(
-        length
-    )
-
-    if not raw:
-        return {}
-
-    return json.loads(
-        raw.decode("utf-8")
-    )
+    handler.wfile.write(body)
 
 
 # =========================================================
@@ -129,1071 +76,675 @@ def read_json(handler):
 # =========================================================
 
 def get_airport(code):
-
-    code = str(
-        code or ""
-    ).strip().upper()
+    code = str(code or "").strip().upper()
 
     if not code:
+        raise ValueError("Airport code is empty")
 
+    if not hasattr(Airport, code):
         raise ValueError(
-            "Airport code is empty"
+            f"Airport {code} is not available in Fli Airport enum"
         )
 
-    try:
-
-        return getattr(
-            Airport,
-            code
-        )
-
-    except AttributeError:
-
-        raise ValueError(
-            f"Unsupported airport code: {code}"
-        )
+    return getattr(Airport, code)
 
 
 # =========================================================
-# BUILD FILTERS
+# BUILD SEARCH
 # =========================================================
 
 def build_filters(search):
+    from_code = search.get("from")
+    to_code = search.get("to")
+    depart_date = search.get("departDate")
+    return_date = search.get("returnDate")
 
-    from_code = str(
-        search.get(
-            "from",
-            ""
+    adults = int(search.get("adults", 1) or 1)
+    children = int(search.get("children", 0) or 0)
+    infants = int(search.get("infants", 0) or 0)
+
+    cabin = str(
+        search.get("cabin", "economy")
+    ).strip().lower()
+
+    if cabin == "business":
+        seat_type = SeatType.BUSINESS
+    elif cabin == "first":
+        seat_type = SeatType.FIRST
+    elif cabin in ("premium", "premium_economy"):
+        seat_type = SeatType.PREMIUM_ECONOMY
+    else:
+        seat_type = SeatType.ECONOMY
+
+    departure_airport = get_airport(from_code)
+    arrival_airport = get_airport(to_code)
+
+    segments = [
+        FlightSegment(
+            departure_airport=[
+                [departure_airport, 0]
+            ],
+            arrival_airport=[
+                [arrival_airport, 0]
+            ],
+            travel_date=depart_date,
         )
-    ).strip().upper()
+    ]
 
-    to_code = str(
-        search.get(
-            "to",
-            ""
+    trip_type = "one-way"
+
+    # Round trip
+    if return_date:
+        trip_type = "round-trip"
+
+        segments.append(
+            FlightSegment(
+                departure_airport=[
+                    [arrival_airport, 0]
+                ],
+                arrival_airport=[
+                    [departure_airport, 0]
+                ],
+                travel_date=return_date,
+            )
         )
-    ).strip().upper()
-
-    depart_date = str(
-        search.get(
-            "departDate",
-            ""
-        )
-    ).strip()
-
-    return_date = str(
-        search.get(
-            "returnDate",
-            ""
-        )
-    ).strip()
-
-
-    departure_airport = get_airport(
-        from_code
-    )
-
-    arrival_airport = get_airport(
-        to_code
-    )
-
-
-    # -----------------------------------------------------
-    # PASSENGERS
-    # -----------------------------------------------------
-
-    adults = int(
-        search.get(
-            "adults",
-            1
-        ) or 1
-    )
-
-    children = int(
-        search.get(
-            "children",
-            0
-        ) or 0
-    )
-
-    infants = int(
-        search.get(
-            "infants",
-            0
-        ) or 0
-    )
-
 
     passenger_info = PassengerInfo(
         adults=adults,
         children=children,
-        infants_in_seat=0,
-        infants_on_lap=infants
+        infants_on_lap=infants,
     )
 
-
-    # -----------------------------------------------------
-    # OUTBOUND
-    # -----------------------------------------------------
-
-    segments = [
-
-        FlightSegment(
-
-            departure_airport=[
-                [
-                    departure_airport,
-                    0
-                ]
-            ],
-
-            arrival_airport=[
-                [
-                    arrival_airport,
-                    0
-                ]
-            ],
-
-            travel_date=depart_date
-        )
-
-    ]
-
-
-    # -----------------------------------------------------
-    # RETURN
-    # -----------------------------------------------------
-
-    if return_date:
-
-        segments.append(
-
-            FlightSegment(
-
-                departure_airport=[
-                    [
-                        arrival_airport,
-                        0
-                    ]
-                ],
-
-                arrival_airport=[
-                    [
-                        departure_airport,
-                        0
-                    ]
-                ],
-
-                travel_date=return_date
-            )
-
-        )
-
-
-    # -----------------------------------------------------
-    # FILTERS
-    # -----------------------------------------------------
+    # IMPORTANT:
+    # We intentionally do NOT specify MaxStops or SortBy here.
+    # This removes enum compatibility as a possible cause.
 
     filters = FlightSearchFilters(
-
         passenger_info=passenger_info,
-
         flight_segments=segments,
-
-        stops=MaxStops.ANY,
-
-        seat_type=SeatType.ECONOMY,
-
-        sort_by=SortBy.CHEAPEST,
-
-        show_all_results=True
+        seat_type=seat_type,
     )
 
-
-    return filters
-
-
-# =========================================================
-# SERIALIZE
-# =========================================================
-
-def serialize_result(item):
-
-    if hasattr(
-        item,
-        "model_dump"
-    ):
-
-        return item.model_dump()
-
-    if hasattr(
-        item,
-        "dict"
-    ):
-
-        return item.dict()
-
-    if hasattr(
-        item,
-        "__dict__"
-    ):
-
-        return item.__dict__
-
-    return str(item)
+    return filters, trip_type
 
 
 # =========================================================
-# FLI DIAGNOSTICS
+# SAFE REPRESENTATION
 # =========================================================
 
-def collect_fli_info():
+def safe_repr(value, limit=1500):
+    try:
+        text = repr(value)
 
-    info = {
-        "pythonVersion":
-            sys.version,
+        if len(text) > limit:
+            text = text[:limit] + "...TRUNCATED"
 
-        "platform":
-            platform.platform(),
+        return text
 
-        "fliModule":
-            None,
+    except Exception as e:
+        return f"<repr failed: {e!r}>"
 
-        "fliVersion":
-            None,
 
-        "searchClass":
-            None,
+# =========================================================
+# SEARCH
+# =========================================================
 
-        "searchMethod":
-            None,
-
-        "airportCheck":
-            {},
-
-        "models":
-            {}
+def run_fli_search(search):
+    diagnostics = {
+        "startedAt": datetime.utcnow().isoformat() + "Z",
+        "fliImportOk": FLI_IMPORT_OK,
+        "fliImportError": FLI_IMPORT_ERROR,
     }
 
+    if not FLI_IMPORT_OK:
+        return None, diagnostics, "Fli import failed"
+
+    filters, trip_type = build_filters(search)
+
+    diagnostics["tripType"] = trip_type
+    diagnostics["filtersType"] = str(type(filters))
+    diagnostics["filtersRepr"] = safe_repr(filters)
+
+    diagnostics["searchClass"] = safe_repr(SearchFlights)
+
+    try:
+        diagnostics["searchSignature"] = str(
+            inspect.signature(SearchFlights.search)
+        )
+    except Exception as e:
+        diagnostics["searchSignatureError"] = repr(e)
+
+    search_engine = SearchFlights()
+
+    diagnostics["searchEngineType"] = str(type(search_engine))
 
     # -----------------------------------------------------
-    # FLI MODULE
+    # FIRST ATTEMPT
     # -----------------------------------------------------
 
     try:
+        diagnostics["attempt"] = "search(filters, top_n, currency)"
 
-        import fli
+        started = datetime.utcnow()
 
-        info["fliModule"] = str(
-            fli
+        raw_result = search_engine.search(
+            filters,
+            top_n=MAX_RESULTS,
+            currency="EGP",
         )
 
-        info["fliVersion"] = getattr(
-            fli,
-            "__version__",
-            "unknown"
-        )
+        elapsed = (
+            datetime.utcnow() - started
+        ).total_seconds()
 
-    except Exception as error:
+        diagnostics["elapsedSeconds"] = elapsed
+        diagnostics["rawType"] = str(type(raw_result))
+        diagnostics["rawIsNone"] = raw_result is None
 
-        info["fliModuleError"] = str(
-            error
-        )
+        if raw_result is None:
+            diagnostics["rawCount"] = 0
+            diagnostics["resultState"] = "NONE"
 
+            return raw_result, diagnostics, None
 
-    # -----------------------------------------------------
-    # SEARCH
-    # -----------------------------------------------------
+        try:
+            diagnostics["rawCount"] = len(raw_result)
+        except Exception:
+            diagnostics["rawCount"] = None
 
-    try:
+        diagnostics["resultState"] = "RESULT"
 
-        import inspect
-
-        info["searchClass"] = str(
-            SearchFlights
-        )
-
-        info["searchMethod"] = str(
-            inspect.signature(
-                SearchFlights.search
+        if isinstance(raw_result, (list, tuple)):
+            diagnostics["firstItemType"] = (
+                str(type(raw_result[0]))
+                if len(raw_result) > 0
+                else None
             )
-        )
 
-    except Exception as error:
+            if len(raw_result) > 0:
+                diagnostics["firstItemRepr"] = safe_repr(
+                    raw_result[0],
+                    3000,
+                )
 
-        info["searchSignatureError"] = str(
-            error
-        )
+        return raw_result, diagnostics, None
+
+    except Exception as e:
+
+        diagnostics["resultState"] = "EXCEPTION"
+        diagnostics["exceptionType"] = str(type(e))
+        diagnostics["exception"] = str(e)
+        diagnostics["exceptionRepr"] = repr(e)
+
+        diagnostics["traceback"] = traceback.format_exc()
+
+        return None, diagnostics, str(e)
 
 
-    # -----------------------------------------------------
-    # AIRPORTS
-    # -----------------------------------------------------
+# =========================================================
+# NETWORK DIAGNOSTIC
+# =========================================================
 
-    for code in [
-        "CAI",
-        "JED",
-        "DXB",
-        "RUH"
-    ]:
+def network_diagnostic():
+
+    result = {
+        "dns": {},
+        "connections": {},
+    }
+
+    # Google domains commonly involved in Fli requests.
+    hosts = [
+        "www.google.com",
+        "google.com",
+    ]
+
+    for host in hosts:
+
+        try:
+            addresses = socket.getaddrinfo(
+                host,
+                443,
+                type=socket.SOCK_STREAM,
+            )
+
+            unique = []
+
+            for item in addresses:
+                try:
+                    addr = item[4][0]
+
+                    if addr not in unique:
+                        unique.append(addr)
+
+                except Exception:
+                    pass
+
+            result["dns"][host] = {
+                "ok": True,
+                "addresses": unique[:10],
+            }
+
+        except Exception as e:
+
+            result["dns"][host] = {
+                "ok": False,
+                "error": repr(e),
+            }
+
+    # Raw TCP connection test.
+    for host in hosts:
 
         try:
 
-            airport = get_airport(
-                code
+            started = datetime.utcnow()
+
+            sock = socket.create_connection(
+                (host, 443),
+                timeout=8,
             )
 
-            info["airportCheck"][code] = {
+            elapsed = (
+                datetime.utcnow() - started
+            ).total_seconds()
 
-                "exists": True,
+            sock.close()
 
-                "value":
-                    str(airport),
-
-                "repr":
-                    repr(airport)
+            result["connections"][host] = {
+                "ok": True,
+                "elapsedSeconds": elapsed,
             }
 
-        except Exception as error:
+        except Exception as e:
 
-            info["airportCheck"][code] = {
-
-                "exists": False,
-
-                "error":
-                    str(error)
+            result["connections"][host] = {
+                "ok": False,
+                "error": repr(e),
             }
 
-
-    # -----------------------------------------------------
-    # ENUMS
-    # -----------------------------------------------------
-
-    try:
-
-        info["models"]["SeatType"] = {
-
-            "ECONOMY":
-                repr(
-                    SeatType.ECONOMY
-                ),
-
-            "BUSINESS":
-                repr(
-                    SeatType.BUSINESS
-                ),
-
-            "FIRST":
-                repr(
-                    SeatType.FIRST
-                )
-        }
-
-    except Exception as error:
-
-        info["models"]["SeatTypeError"] = str(
-            error
-        )
-
-
-    try:
-
-        info["models"]["MaxStops"] = {
-
-            "ANY":
-                repr(
-                    MaxStops.ANY
-                )
-        }
-
-    except Exception as error:
-
-        info["models"]["MaxStopsError"] = str(
-            error
-        )
-
-
-    try:
-
-        info["models"]["SortBy"] = {
-
-            "CHEAPEST":
-                repr(
-                    SortBy.CHEAPEST
-                )
-        }
-
-    except Exception as error:
-
-        info["models"]["SortByError"] = str(
-            error
-        )
-
-
-    return info
+    return result
 
 
 # =========================================================
-# HTTP HANDLER
+# HANDLER
 # =========================================================
 
-class Handler(
-    BaseHTTPRequestHandler
-):
+class Handler(BaseHTTPRequestHandler):
 
-
-    def log_message(
-        self,
-        format,
-        *args
-    ):
-
+    def log_message(self, format, *args):
         print(
-            "%s - %s"
-            % (
-                self.address_string(),
-                format % args
-            )
+            "[HTTP]",
+            format % args,
+            flush=True,
         )
-
-
-    # =====================================================
-    # OPTIONS
-    # =====================================================
 
     def do_OPTIONS(self):
-
-        self.send_response(
-            204
+        send_json(
+            self,
+            {
+                "ok": True,
+                "options": True,
+            },
+            204,
         )
 
-        add_cors(
-            self
-        )
-
-        self.end_headers()
-
-
-    # =====================================================
+    # -----------------------------------------------------
     # GET
-    # =====================================================
+    # -----------------------------------------------------
 
     def do_GET(self):
 
-        path = self.path.split(
-            "?"
-        )[0]
-
-
-        # -------------------------------------------------
-        # HEALTH
-        # -------------------------------------------------
+        path = urlparse(
+            self.path
+        ).path
 
         if path == "/api/health":
 
             send_json(
-
                 self,
-
-                200,
-
                 {
                     "ok": True,
-
-                    "service":
-                        "jawwak-google-flights-fli",
-
-                    "engine":
-                        "fli",
-
-                    "version":
-                        "0.9.0",
-
-                    "apiKeyRequired":
-                        False,
-
-                    "mode":
-                        "diagnostic"
-                }
-
+                    "service": "jawwak-google-flights-fli",
+                    "engine": "fli",
+                    "fliVersion": "0.9.0",
+                    "apiKeyRequired": False,
+                },
             )
 
             return
-
-
-        # -------------------------------------------------
-        # DIAGNOSTIC
-        # -------------------------------------------------
 
         if path == "/api/diagnostic":
 
-            try:
+            network = network_diagnostic()
 
-                info = collect_fli_info()
-
-                send_json(
-
-                    self,
-
-                    200,
-
-                    {
-                        "ok": True,
-
-                        "mode":
-                            "diagnostic",
-
-                        "environment":
-                            info
-                    }
-
-                )
-
-            except Exception as error:
-
-                send_json(
-
-                    self,
-
-                    500,
-
-                    {
-                        "ok": False,
-
-                        "error":
-                            str(error)
-                    }
-
-                )
-
-            return
-
-
-        # -------------------------------------------------
-        # ROOT
-        # -------------------------------------------------
-
-        if path == "/":
-
-            send_json(
-
-                self,
-
-                200,
-
-                {
-                    "ok": True,
-
-                    "service":
-                        "jawwak-google-flights-fli",
-
-                    "engine":
-                        "fli",
-
-                    "version":
-                        "0.9.0",
-
-                    "mode":
-                        "diagnostic"
-                }
-
-            )
-
-            return
-
-
-        # -------------------------------------------------
-        # 404
-        # -------------------------------------------------
-
-        send_json(
-
-            self,
-
-            404,
-
-            {
-                "ok": False,
-
-                "error":
-                    "Not Found"
+            payload = {
+                "ok": True,
+                "diagnostic": True,
+                "environment": {
+                    "pythonVersion": sys.version,
+                    "platform": platform.platform(),
+                    "hostname": socket.gethostname(),
+                    "fliImported": FLI_IMPORT_OK,
+                    "fliImportError": FLI_IMPORT_ERROR,
+                    "fliModule": (
+                        safe_repr(fli)
+                        if FLI_IMPORT_OK
+                        else None
+                    ),
+                },
+                "network": network,
+                "note": (
+                    "This endpoint tests Render DNS/TCP connectivity "
+                    "to Google. It does not perform a flight search."
+                ),
             }
 
+            send_json(self, payload)
+
+            return
+
+        send_json(
+            self,
+            {
+                "ok": False,
+                "error": "Not Found",
+            },
+            404,
         )
 
-
-    # =====================================================
+    # -----------------------------------------------------
     # POST
-    # =====================================================
+    # -----------------------------------------------------
 
     def do_POST(self):
 
-        path = self.path.split(
-            "?"
-        )[0]
-
+        path = urlparse(
+            self.path
+        ).path
 
         if path != "/api/search-flights":
 
             send_json(
-
                 self,
-
-                404,
-
                 {
                     "ok": False,
-
-                    "error":
-                        "Not Found"
-                }
-
+                    "error": "Not Found",
+                },
+                404,
             )
 
             return
 
+        try:
+
+            content_length = int(
+                self.headers.get(
+                    "Content-Length",
+                    "0",
+                )
+            )
+
+            raw_body = self.rfile.read(
+                content_length
+            )
+
+            search = json.loads(
+                raw_body.decode("utf-8")
+            )
+
+        except Exception as e:
+
+            send_json(
+                self,
+                {
+                    "ok": False,
+                    "error": "Invalid JSON",
+                    "details": repr(e),
+                },
+                400,
+            )
+
+            return
+
+        required = [
+            "from",
+            "to",
+            "departDate",
+        ]
+
+        missing = [
+            key
+            for key in required
+            if not search.get(key)
+        ]
+
+        if missing:
+
+            send_json(
+                self,
+                {
+                    "ok": False,
+                    "error": "Missing required fields",
+                    "missing": missing,
+                },
+                400,
+            )
+
+            return
+
+        print(
+            "\n========================================",
+            flush=True,
+        )
+
+        print(
+            "FINAL FLI DIAGNOSTIC SEARCH",
+            flush=True,
+        )
+
+        print(
+            json.dumps(
+                search,
+                ensure_ascii=False,
+                indent=2,
+            ),
+            flush=True,
+        )
+
+        print(
+            "========================================\n",
+            flush=True,
+        )
 
         try:
 
-            # =============================================
-            # REQUEST
-            # =============================================
-
-            search = read_json(
-                self
+            raw_result, diagnostics, error = (
+                run_fli_search(search)
             )
 
-
-            if not search:
+            if error:
 
                 send_json(
-
                     self,
-
-                    400,
-
                     {
                         "ok": False,
-
-                        "error":
-                            "Request body is empty"
-                    }
-
+                        "error": error,
+                        "engine": "fli",
+                        "diagnostic": diagnostics,
+                    },
+                    500,
                 )
 
                 return
 
+            if raw_result is None:
 
-            # =============================================
-            # BASIC DATA
-            # =============================================
-
-            from_code = str(
-                search.get(
-                    "from",
-                    ""
-                )
-            ).strip().upper()
-
-            to_code = str(
-                search.get(
-                    "to",
-                    ""
-                )
-            ).strip().upper()
-
-            depart_date = str(
-                search.get(
-                    "departDate",
-                    ""
-                )
-            ).strip()
-
-            return_date = str(
-                search.get(
-                    "returnDate",
-                    ""
-                )
-            ).strip()
-
-
-            if not from_code:
-
-                raise ValueError(
-                    "Missing from airport"
+                send_json(
+                    self,
+                    {
+                        "ok": True,
+                        "diagnostic": True,
+                        "count": 0,
+                        "rawResultType": "NoneType",
+                        "rawResultIsNone": True,
+                        "rawResultCount": 0,
+                        "source": "googleflights",
+                        "engine": "fli",
+                        "fliVersion": "0.9.0",
+                        "tripType": diagnostics.get(
+                            "tripType"
+                        ),
+                        "from": search.get("from"),
+                        "to": search.get("to"),
+                        "departDate": search.get(
+                            "departDate"
+                        ),
+                        "returnDate": search.get(
+                            "returnDate"
+                        ),
+                        "flights": [],
+                        "diagnostics": diagnostics,
+                        "network": network_diagnostic(),
+                    },
                 )
 
+                return
 
-            if not to_code:
+            # Convert raw Fli objects to JSON safely.
+            flights = []
 
-                raise ValueError(
-                    "Missing to airport"
-                )
+            if isinstance(
+                raw_result,
+                (list, tuple),
+            ):
 
-
-            if not depart_date:
-
-                raise ValueError(
-                    "Missing departDate"
-                )
-
-
-            # =============================================
-            # BUILD FILTERS
-            # =============================================
-
-            filters = build_filters(
-                search
-            )
-
-
-            # =============================================
-            # CREATE ENGINE
-            # =============================================
-
-            engine = SearchFlights()
-
-
-            # =============================================
-            # SEARCH
-            # =============================================
-
-            print(
-                "========================================"
-            )
-
-            print(
-                "FLI DIAGNOSTIC SEARCH"
-            )
-
-            print(
-                "From:",
-                from_code
-            )
-
-            print(
-                "To:",
-                to_code
-            )
-
-            print(
-                "Departure:",
-                depart_date
-            )
-
-            print(
-                "Return:",
-                return_date or "NONE"
-            )
-
-            print(
-                "Currency:",
-                "NONE"
-            )
-
-            print(
-                "Language:",
-                "NONE"
-            )
-
-            print(
-                "Country:",
-                "NONE"
-            )
-
-            print(
-                "========================================"
-            )
-
-
-            # -------------------------------------------------
-            # IMPORTANT:
-            #
-            # First test exactly what Fli does with its
-            # normal search call.
-            # -------------------------------------------------
-
-            results = engine.search(
-
-                filters,
-
-                top_n=TEST_TOP_N
-
-            )
-
-
-            # =============================================
-            # RESULT ANALYSIS
-            # =============================================
-
-            result_is_none = (
-                results is None
-            )
-
-            result_type = str(
-                type(results)
-            )
-
-            result_count = (
-                0
-                if results is None
-                else len(results)
-            )
-
-
-            output = []
-
-
-            if results:
-
-                for item in results:
+                for item in raw_result:
 
                     try:
 
-                        output.append(
-                            serialize_result(
-                                item
+                        flights.append(
+                            json.loads(
+                                json.dumps(
+                                    item,
+                                    default=str,
+                                )
                             )
                         )
 
-                    except Exception as error:
+                    except Exception as e:
 
-                        output.append({
+                        flights.append(
+                            {
+                                "serializationError": repr(e),
+                                "repr": safe_repr(item),
+                            }
+                        )
 
-                            "serializationError":
-                                str(error)
+            else:
 
-                        })
-
-
-            # =============================================
-            # RESPONSE
-            # =============================================
-
-            response = {
-
-                "ok":
-                    True,
-
-                "diagnostic":
-                    True,
-
-                "count":
-                    len(output),
-
-                "rawResultType":
-                    result_type,
-
-                "rawResultIsNone":
-                    result_is_none,
-
-                "rawResultCount":
-                    result_count,
-
-                "source":
-                    "googleflights",
-
-                "engine":
-                    "fli",
-
-                "fliVersion":
-                    "0.9.0",
-
-                "tripType":
-                    (
-                        "round-trip"
-                        if return_date
-                        else "one-way"
-                    ),
-
-                "from":
-                    from_code,
-
-                "to":
-                    to_code,
-
-                "departDate":
-                    depart_date,
-
-                "returnDate":
-                    (
-                        return_date
-                        if return_date
-                        else None
-                    ),
-
-                "flights":
-                    output,
-
-                "nextStep":
-                    (
-                        "Fli returned results."
-                        if output
-                        else
-                        "Fli completed the search "
-                        "but returned an empty list. "
-                        "Check /api/diagnostic and "
-                        "Render logs."
+                flights = [
+                    json.loads(
+                        json.dumps(
+                            raw_result,
+                            default=str,
+                        )
                     )
-
-            }
-
-
-            # =============================================
-            # EXTRA DIAGNOSTIC WHEN EMPTY
-            # =============================================
-
-            if len(output) == 0:
-
-                response[
-                    "emptyResultDiagnosis"
-                ] = {
-
-                    "searchCallCompleted":
-                        True,
-
-                    "exceptionThrown":
-                        False,
-
-                    "fliReturned":
-                        "None"
-                        if result_is_none
-                        else "empty list",
-
-                    "possibleCause":
-                        "Google/Fli returned no "
-                        "parsed itineraries. "
-                        "This does not prove that "
-                        "Google returned HTTP 200; "
-                        "the installed Fli parser "
-                        "may have swallowed/retried "
-                        "the underlying request.",
-
-                    "diagnosticEndpoint":
-                        "/api/diagnostic"
-
-                }
-
+                ]
 
             send_json(
-
                 self,
-
-                200,
-
-                response
-
-            )
-
-
-        except Exception as error:
-
-            print(
-                "========================================"
-            )
-
-            print(
-                "FLI DIAGNOSTIC ERROR"
-            )
-
-            print(
-                str(error)
-            )
-
-            print(
-                "========================================"
-            )
-
-            traceback.print_exc()
-
-
-            send_json(
-
-                self,
-
-                500,
-
                 {
+                    "ok": True,
+                    "count": len(flights),
+                    "currency": "EGP",
+                    "source": "googleflights",
+                    "engine": "fli",
+                    "fliVersion": "0.9.0",
+                    "tripType": diagnostics.get(
+                        "tripType"
+                    ),
+                    "from": search.get("from"),
+                    "to": search.get("to"),
+                    "departDate": search.get(
+                        "departDate"
+                    ),
+                    "returnDate": search.get(
+                        "returnDate"
+                    ),
+                    "flights": flights,
+                    "diagnostics": diagnostics,
+                },
+            )
 
-                    "ok":
-                        False,
+        except Exception as e:
 
-                    "diagnostic":
-                        True,
+            print(
+                traceback.format_exc(),
+                flush=True,
+            )
 
-                    "error":
-                        str(error),
-
-                    "errorType":
-                        str(
-                            type(error)
-                        ),
-
-                    "engine":
-                        "fli",
-
-                    "version":
-                        "0.9.0"
-
-                }
-
+            send_json(
+                self,
+                {
+                    "ok": False,
+                    "error": str(e),
+                    "exceptionType": str(type(e)),
+                    "traceback": traceback.format_exc(),
+                    "engine": "fli",
+                },
+                500,
             )
 
 
 # =========================================================
-# START SERVER
-# =========================================================
-
-def main():
-
-    server = ThreadingHTTPServer(
-
-        (
-            "0.0.0.0",
-            PORT
-        ),
-
-        Handler
-
-    )
-
-
-    print(
-        "========================================"
-    )
-
-    print(
-        "JAWAKK GOOGLE FLIGHTS DIAGNOSTIC SERVER"
-    )
-
-    print(
-        f"Port: {PORT}"
-    )
-
-    print(
-        "Fli: 0.9.0"
-    )
-
-    print(
-        "API Key: NOT REQUIRED"
-    )
-
-    print(
-        "Diagnostic endpoint: /api/diagnostic"
-    )
-
-    print(
-        "========================================"
-    )
-
-
-    server.serve_forever()
-
-
-# =========================================================
-# RUN
+# SERVER
 # =========================================================
 
 if __name__ == "__main__":
 
-    main()
+    print(
+        "========================================",
+        flush=True,
+    )
+
+    print(
+        "Jawwak Google Flights - FINAL DIAGNOSTIC",
+        flush=True,
+    )
+
+    print(
+        f"Python: {sys.version}",
+        flush=True,
+    )
+
+    print(
+        f"Port: {PORT}",
+        flush=True,
+    )
+
+    print(
+        f"Fli import: {FLI_IMPORT_OK}",
+        flush=True,
+    )
+
+    if FLI_IMPORT_ERROR:
+        print(
+            f"Fli import error: {FLI_IMPORT_ERROR}",
+            flush=True,
+        )
+
+    print(
+        "========================================",
+        flush=True,
+    )
+
+    server = ThreadingHTTPServer(
+        ("0.0.0.0", PORT),
+        Handler,
+    )
+
+    print(
+        f"Server listening on port {PORT}",
+        flush=True,
+    )
+
+    server.serve_forever()
