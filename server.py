@@ -1,6 +1,9 @@
 import os
 import json
 import traceback
+import platform
+import sys
+
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from fli.models import (
@@ -16,7 +19,18 @@ from fli.models import (
 from fli.search import SearchFlights
 
 
-PORT = int(os.environ.get("PORT", "10000"))
+# =========================================================
+# CONFIG
+# =========================================================
+
+PORT = int(
+    os.environ.get(
+        "PORT",
+        "10000"
+    )
+)
+
+TEST_TOP_N = 5
 
 
 # =========================================================
@@ -24,6 +38,7 @@ PORT = int(os.environ.get("PORT", "10000"))
 # =========================================================
 
 def add_cors(handler):
+
     handler.send_header(
         "Access-Control-Allow-Origin",
         "*"
@@ -44,7 +59,11 @@ def add_cors(handler):
 # JSON RESPONSE
 # =========================================================
 
-def send_json(handler, status_code, payload):
+def send_json(
+    handler,
+    status_code,
+    payload
+):
 
     body = json.dumps(
         payload,
@@ -52,9 +71,13 @@ def send_json(handler, status_code, payload):
         default=str
     ).encode("utf-8")
 
-    handler.send_response(status_code)
+    handler.send_response(
+        status_code
+    )
 
-    add_cors(handler)
+    add_cors(
+        handler
+    )
 
     handler.send_header(
         "Content-Type",
@@ -68,27 +91,29 @@ def send_json(handler, status_code, payload):
 
     handler.end_headers()
 
-    handler.wfile.write(body)
+    handler.wfile.write(
+        body
+    )
 
 
 # =========================================================
-# READ REQUEST JSON
+# READ JSON
 # =========================================================
 
 def read_json(handler):
 
-    content_length = int(
+    length = int(
         handler.headers.get(
             "Content-Length",
             "0"
         )
     )
 
-    if content_length <= 0:
+    if length <= 0:
         return {}
 
     raw = handler.rfile.read(
-        content_length
+        length
     )
 
     if not raw:
@@ -110,6 +135,7 @@ def get_airport(code):
     ).strip().upper()
 
     if not code:
+
         raise ValueError(
             "Airport code is empty"
         )
@@ -129,7 +155,7 @@ def get_airport(code):
 
 
 # =========================================================
-# BUILD SEARCH FILTERS
+# BUILD FILTERS
 # =========================================================
 
 def build_filters(search):
@@ -162,10 +188,6 @@ def build_filters(search):
         )
     ).strip()
 
-
-    # -----------------------------------------------------
-    # AIRPORTS
-    # -----------------------------------------------------
 
     departure_airport = get_airport(
         from_code
@@ -205,8 +227,8 @@ def build_filters(search):
     passenger_info = PassengerInfo(
         adults=adults,
         children=children,
-        infants_on_lap=infants,
-        infants_in_seat=0
+        infants_in_seat=0,
+        infants_on_lap=infants
     )
 
 
@@ -292,7 +314,7 @@ def build_filters(search):
 
 
 # =========================================================
-# SERIALIZE RESULT
+# SERIALIZE
 # =========================================================
 
 def serialize_result(item):
@@ -311,7 +333,204 @@ def serialize_result(item):
 
         return item.dict()
 
+    if hasattr(
+        item,
+        "__dict__"
+    ):
+
+        return item.__dict__
+
     return str(item)
+
+
+# =========================================================
+# FLI DIAGNOSTICS
+# =========================================================
+
+def collect_fli_info():
+
+    info = {
+        "pythonVersion":
+            sys.version,
+
+        "platform":
+            platform.platform(),
+
+        "fliModule":
+            None,
+
+        "fliVersion":
+            None,
+
+        "searchClass":
+            None,
+
+        "searchMethod":
+            None,
+
+        "airportCheck":
+            {},
+
+        "models":
+            {}
+    }
+
+
+    # -----------------------------------------------------
+    # FLI MODULE
+    # -----------------------------------------------------
+
+    try:
+
+        import fli
+
+        info["fliModule"] = str(
+            fli
+        )
+
+        info["fliVersion"] = getattr(
+            fli,
+            "__version__",
+            "unknown"
+        )
+
+    except Exception as error:
+
+        info["fliModuleError"] = str(
+            error
+        )
+
+
+    # -----------------------------------------------------
+    # SEARCH
+    # -----------------------------------------------------
+
+    try:
+
+        import inspect
+
+        info["searchClass"] = str(
+            SearchFlights
+        )
+
+        info["searchMethod"] = str(
+            inspect.signature(
+                SearchFlights.search
+            )
+        )
+
+    except Exception as error:
+
+        info["searchSignatureError"] = str(
+            error
+        )
+
+
+    # -----------------------------------------------------
+    # AIRPORTS
+    # -----------------------------------------------------
+
+    for code in [
+        "CAI",
+        "JED",
+        "DXB",
+        "RUH"
+    ]:
+
+        try:
+
+            airport = get_airport(
+                code
+            )
+
+            info["airportCheck"][code] = {
+
+                "exists": True,
+
+                "value":
+                    str(airport),
+
+                "repr":
+                    repr(airport)
+            }
+
+        except Exception as error:
+
+            info["airportCheck"][code] = {
+
+                "exists": False,
+
+                "error":
+                    str(error)
+            }
+
+
+    # -----------------------------------------------------
+    # ENUMS
+    # -----------------------------------------------------
+
+    try:
+
+        info["models"]["SeatType"] = {
+
+            "ECONOMY":
+                repr(
+                    SeatType.ECONOMY
+                ),
+
+            "BUSINESS":
+                repr(
+                    SeatType.BUSINESS
+                ),
+
+            "FIRST":
+                repr(
+                    SeatType.FIRST
+                )
+        }
+
+    except Exception as error:
+
+        info["models"]["SeatTypeError"] = str(
+            error
+        )
+
+
+    try:
+
+        info["models"]["MaxStops"] = {
+
+            "ANY":
+                repr(
+                    MaxStops.ANY
+                )
+        }
+
+    except Exception as error:
+
+        info["models"]["MaxStopsError"] = str(
+            error
+        )
+
+
+    try:
+
+        info["models"]["SortBy"] = {
+
+            "CHEAPEST":
+                repr(
+                    SortBy.CHEAPEST
+                )
+        }
+
+    except Exception as error:
+
+        info["models"]["SortByError"] = str(
+            error
+        )
+
+
+    return info
 
 
 # =========================================================
@@ -391,10 +610,61 @@ class Handler(
                         "0.9.0",
 
                     "apiKeyRequired":
-                        False
+                        False,
+
+                    "mode":
+                        "diagnostic"
                 }
 
             )
+
+            return
+
+
+        # -------------------------------------------------
+        # DIAGNOSTIC
+        # -------------------------------------------------
+
+        if path == "/api/diagnostic":
+
+            try:
+
+                info = collect_fli_info()
+
+                send_json(
+
+                    self,
+
+                    200,
+
+                    {
+                        "ok": True,
+
+                        "mode":
+                            "diagnostic",
+
+                        "environment":
+                            info
+                    }
+
+                )
+
+            except Exception as error:
+
+                send_json(
+
+                    self,
+
+                    500,
+
+                    {
+                        "ok": False,
+
+                        "error":
+                            str(error)
+                    }
+
+                )
 
             return
 
@@ -421,7 +691,10 @@ class Handler(
                         "fli",
 
                     "version":
-                        "0.9.0"
+                        "0.9.0",
+
+                    "mode":
+                        "diagnostic"
                 }
 
             )
@@ -441,7 +714,9 @@ class Handler(
 
             {
                 "ok": False,
-                "error": "Not Found"
+
+                "error":
+                    "Not Found"
             }
 
         )
@@ -468,7 +743,9 @@ class Handler(
 
                 {
                     "ok": False,
-                    "error": "Not Found"
+
+                    "error":
+                        "Not Found"
                 }
 
             )
@@ -479,7 +756,7 @@ class Handler(
         try:
 
             # =============================================
-            # READ REQUEST
+            # REQUEST
             # =============================================
 
             search = read_json(
@@ -497,6 +774,7 @@ class Handler(
 
                     {
                         "ok": False,
+
                         "error":
                             "Request body is empty"
                     }
@@ -507,7 +785,7 @@ class Handler(
 
 
             # =============================================
-            # VALIDATION
+            # BASIC DATA
             # =============================================
 
             from_code = str(
@@ -561,7 +839,23 @@ class Handler(
 
 
             # =============================================
-            # LOG
+            # BUILD FILTERS
+            # =============================================
+
+            filters = build_filters(
+                search
+            )
+
+
+            # =============================================
+            # CREATE ENGINE
+            # =============================================
+
+            engine = SearchFlights()
+
+
+            # =============================================
+            # SEARCH
             # =============================================
 
             print(
@@ -569,7 +863,7 @@ class Handler(
             )
 
             print(
-                "JAWAKK FLI TEST SEARCH"
+                "FLI DIAGNOSTIC SEARCH"
             )
 
             print(
@@ -593,100 +887,193 @@ class Handler(
             )
 
             print(
+                "Currency:",
+                "NONE"
+            )
+
+            print(
+                "Language:",
+                "NONE"
+            )
+
+            print(
+                "Country:",
+                "NONE"
+            )
+
+            print(
                 "========================================"
             )
 
 
-            # =============================================
-            # BUILD FILTERS
-            # =============================================
-
-            filters = build_filters(
-                search
-            )
-
-
-            print(
-                "FILTERS CREATED:"
-            )
-
-            print(
-                repr(filters)
-            )
-
-
-            # =============================================
-            # SEARCH
-            # =============================================
-
-            engine = SearchFlights()
-
-
-            print(
-                "SEARCH ENGINE CREATED"
-            )
-
+            # -------------------------------------------------
+            # IMPORTANT:
+            #
+            # First test exactly what Fli does with its
+            # normal search call.
+            # -------------------------------------------------
 
             results = engine.search(
 
                 filters,
 
-                top_n=5
+                top_n=TEST_TOP_N
 
             )
 
 
             # =============================================
-            # RAW RESULT
+            # RESULT ANALYSIS
             # =============================================
 
-            print(
-                "RAW RESULT TYPE:",
+            result_is_none = (
+                results is None
+            )
+
+            result_type = str(
                 type(results)
             )
 
-            print(
-                "RAW RESULT:"
+            result_count = (
+                0
+                if results is None
+                else len(results)
             )
-
-            print(
-                repr(results)
-            )
-
-
-            # =============================================
-            # NORMALIZE
-            # =============================================
-
-            if results is None:
-
-                results = []
 
 
             output = []
 
 
-            for item in results:
+            if results:
 
-                try:
+                for item in results:
 
-                    output.append(
-                        serialize_result(
-                            item
+                    try:
+
+                        output.append(
+                            serialize_result(
+                                item
+                            )
                         )
-                    )
 
-                except Exception as error:
+                    except Exception as error:
 
-                    print(
-                        "RESULT SERIALIZATION ERROR:",
-                        str(error)
-                    )
+                        output.append({
+
+                            "serializationError":
+                                str(error)
+
+                        })
 
 
             # =============================================
             # RESPONSE
             # =============================================
+
+            response = {
+
+                "ok":
+                    True,
+
+                "diagnostic":
+                    True,
+
+                "count":
+                    len(output),
+
+                "rawResultType":
+                    result_type,
+
+                "rawResultIsNone":
+                    result_is_none,
+
+                "rawResultCount":
+                    result_count,
+
+                "source":
+                    "googleflights",
+
+                "engine":
+                    "fli",
+
+                "fliVersion":
+                    "0.9.0",
+
+                "tripType":
+                    (
+                        "round-trip"
+                        if return_date
+                        else "one-way"
+                    ),
+
+                "from":
+                    from_code,
+
+                "to":
+                    to_code,
+
+                "departDate":
+                    depart_date,
+
+                "returnDate":
+                    (
+                        return_date
+                        if return_date
+                        else None
+                    ),
+
+                "flights":
+                    output,
+
+                "nextStep":
+                    (
+                        "Fli returned results."
+                        if output
+                        else
+                        "Fli completed the search "
+                        "but returned an empty list. "
+                        "Check /api/diagnostic and "
+                        "Render logs."
+                    )
+
+            }
+
+
+            # =============================================
+            # EXTRA DIAGNOSTIC WHEN EMPTY
+            # =============================================
+
+            if len(output) == 0:
+
+                response[
+                    "emptyResultDiagnosis"
+                ] = {
+
+                    "searchCallCompleted":
+                        True,
+
+                    "exceptionThrown":
+                        False,
+
+                    "fliReturned":
+                        "None"
+                        if result_is_none
+                        else "empty list",
+
+                    "possibleCause":
+                        "Google/Fli returned no "
+                        "parsed itineraries. "
+                        "This does not prove that "
+                        "Google returned HTTP 200; "
+                        "the installed Fli parser "
+                        "may have swallowed/retried "
+                        "the underlying request.",
+
+                    "diagnosticEndpoint":
+                        "/api/diagnostic"
+
+                }
+
 
             send_json(
 
@@ -694,57 +1081,7 @@ class Handler(
 
                 200,
 
-                {
-
-                    "ok": True,
-
-                    "count":
-                        len(output),
-
-                    "currency":
-                        "EGP",
-
-                    "source":
-                        "googleflights",
-
-                    "engine":
-                        "fli",
-
-                    "version":
-                        "0.9.0",
-
-                    "tripType":
-                        (
-                            "round-trip"
-                            if return_date
-                            else "one-way"
-                        ),
-
-                    "from":
-                        from_code,
-
-                    "to":
-                        to_code,
-
-                    "departDate":
-                        depart_date,
-
-                    "returnDate":
-                        (
-                            return_date
-                            if return_date
-                            else None
-                        ),
-
-                    "flights":
-                        output,
-
-                    "rawResultType":
-                        str(
-                            type(results)
-                        )
-
-                }
+                response
 
             )
 
@@ -756,7 +1093,7 @@ class Handler(
             )
 
             print(
-                "FLI ERROR:"
+                "FLI DIAGNOSTIC ERROR"
             )
 
             print(
@@ -777,23 +1114,34 @@ class Handler(
                 500,
 
                 {
-                    "ok": False,
+
+                    "ok":
+                        False,
+
+                    "diagnostic":
+                        True,
 
                     "error":
                         str(error),
+
+                    "errorType":
+                        str(
+                            type(error)
+                        ),
 
                     "engine":
                         "fli",
 
                     "version":
                         "0.9.0"
+
                 }
 
             )
 
 
 # =========================================================
-# START
+# START SERVER
 # =========================================================
 
 def main():
@@ -815,7 +1163,7 @@ def main():
     )
 
     print(
-        "Jawwak Google Flights Fli Server"
+        "JAWAKK GOOGLE FLIGHTS DIAGNOSTIC SERVER"
     )
 
     print(
@@ -831,12 +1179,20 @@ def main():
     )
 
     print(
+        "Diagnostic endpoint: /api/diagnostic"
+    )
+
+    print(
         "========================================"
     )
 
 
     server.serve_forever()
 
+
+# =========================================================
+# RUN
+# =========================================================
 
 if __name__ == "__main__":
 
