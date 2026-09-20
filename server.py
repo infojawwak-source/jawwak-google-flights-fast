@@ -57,7 +57,7 @@ class Handler(BaseHTTPRequestHandler):
             if r.get('maxStops') is not None:kw['max_stops']=jint(r.get('maxStops'))
             if r.get('airlines'):
                 a=r['airlines']; kw['airlines']=[x.strip().upper() for x in a.split(',')] if isinstance(a,str) else a
-            t=datetime.utcnow(); result=search(origin,dest,date,return_date=ret,**kw); elapsed=(datetime.utcnow()-t).total_seconds()
+            t=datetime.utcnow(); result = search(     origin,     dest,     date,     return_date=ret,     cabin=kw.get("cabin", "economy"),     timeout=90,     retries=2,     country="EG", ); elapsed=(datetime.utcnow()-t).total_seconds()
             opts=(val(result,'results',[]) or [])[:MAX_RESULTS]
             pr=val(result,'price_range')
             send_json(self,{'ok':True,'count':len(opts),'currency':val(result,'currency') or 'EGP','source':'googleflights','engine':'swoop','tripType':'round-trip' if ret else 'one-way','from':origin,'to':dest,'departDate':date,'returnDate':ret,'elapsedSeconds':elapsed,'isComplete':val(result,'is_complete'),'priceRange':{'minimum':val(pr,'minimum'),'maximum':val(pr,'maximum')} if pr else None,'flights':[option_json(x) for x in opts],'pricePolicy':'Google Flights shopping total; selected results can be price-checked with /api/price-selector.'})
