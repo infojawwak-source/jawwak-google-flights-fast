@@ -1,1 +1,1 @@
-flights==0.9.0
+flights @ git+https://github.com/punitarani/fli.git@main
