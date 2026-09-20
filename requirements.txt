@@ -1,1 +1,1 @@
-swoop-flights
+swoop-flights @ git+https://github.com/saraswatayu/swoop.git@main
